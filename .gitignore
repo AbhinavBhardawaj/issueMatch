@@ -41,3 +41,5 @@ htmlcov/
 # IDE configs (Optional, match your editor)
 .vscode/
 .idea/
+
+.agents/
