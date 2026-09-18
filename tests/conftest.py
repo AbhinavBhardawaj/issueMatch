@@ -5,8 +5,7 @@ from app.domain.models import (
     RepoContext, RepoContextFile, ExistingIssue
 )
 from app.verifier.evidence import EvidenceItemResult, EvidenceValidationResult
-from app.dedup.detector import DedupResult, normalized_finding_signature
-from app.services.issue_gate import GateResult, GateDecision
+from app.services.issue_gate import GateResult, GateDecision, DedupResult, normalized_finding_signature
 
 @pytest.fixture
 def make_finding():

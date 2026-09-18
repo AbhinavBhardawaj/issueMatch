@@ -4,7 +4,7 @@ from typing import Callable
 from pydantic import ValidationError
 from app.domain.states import VerificationStatus
 from app.domain.models import Finding, RepoContext, Verification
-from app.verifier.prompts import SYSTEM_PROMPT, build_user_prompt
+from app.verifier.prompts import SYSTEM_PROMPT, build_verifier_prompt
 from app.verifier.schemas import VerifierLLMResponse, LLMInvocationError, MalformedVerifierResponse
 
 def run_verifier(
@@ -13,7 +13,7 @@ def run_verifier(
     llm_caller: Callable[[str, str], str]
 ) -> Verification:
     
-    user_prompt = build_user_prompt(finding, repo_context)
+    user_prompt = build_verifier_prompt(finding, repo_context)
     
     try:
         response_text = llm_caller(SYSTEM_PROMPT, user_prompt)
