@@ -1,0 +1,74 @@
+from pydantic import BaseModel, ConfigDict, Field
+from app.domain.states import FindingStatus, VerificationStatus
+
+class EvidenceItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    file: str
+    line: int = Field(ge=1)
+    snippet: str
+
+class Finding(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    finding_id: str
+    installation_id: str
+    repository_id: str
+    commit_sha: str
+    title: str
+    severity: str
+    file: str
+    function: str | None = None
+    line: int | None = None
+    description: str
+    expected_behavior: str
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    status: FindingStatus = FindingStatus.DISCOVERED
+    created_at: str = ""
+
+class Verification(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    verification_id: str
+    finding_id: str
+    installation_id: str
+    repository_id: str
+    commit_sha: str
+    status: VerificationStatus
+    reason: str
+    supporting_evidence: list[dict] = Field(default_factory=list)
+    counter_evidence: list[dict] = Field(default_factory=list)
+    duplicate_issue: bool = False
+    confidence: float = Field(ge=0, le=1)
+    verified_at: str = ""
+
+class RepoContextFile(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    path: str
+    content: str
+    size_bytes: int = 0
+
+class ExistingIssue(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    number: int
+    title: str
+    state: str
+    body_summary: str = ""
+
+class RepoContext(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    
+    repository_id: str
+    installation_id: str
+    owner: str
+    name: str
+    commit_sha: str
+    default_branch: str = "main"
+    files: list[RepoContextFile] = Field(default_factory=list)
+    readme: str = ""
+    existing_issues: list[ExistingIssue] = Field(default_factory=list)
+    test_files: list[RepoContextFile] = Field(default_factory=list)
+    total_context_bytes: int = 0
