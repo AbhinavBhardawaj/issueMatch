@@ -252,7 +252,45 @@ class DefaultAnalysisService:
 
     For REJECT, explain the concrete repository mismatch.
 
-    Return ONLY valid JSON compatible with the ApproachAnalysis schema.
+    ====================
+    REQUIRED JSON OUTPUT
+    ====================
+
+    Return exactly ONE JSON object with these exact top-level keys:
+
+    {{
+      "decision": "PASS",
+      "confidence": 0.0,
+      "strengths": [],
+      "issues": [],
+      "missing_requirements": [],
+      "evidence": [],
+      "revision_feedback": "",
+      "recommendation": ""
+    }}
+
+    IMPORTANT:
+    - The key MUST be named "decision", never "approach", "selected", or anything else.
+    - "decision" MUST be exactly one of:
+      "PASS", "REVISION_REQUIRED", "REJECT"
+    - "confidence" MUST be a number between 0 and 1.
+    - "strengths" MUST be a JSON array of strings.
+    - "issues" MUST be a JSON array of strings.
+    - "missing_requirements" MUST be a JSON array of strings.
+    - "evidence" MUST be a JSON array of strings.
+    - "revision_feedback" MUST be a string.
+    - "recommendation" MUST be a string.
+    - Do not create any additional top-level keys.
+    - Do not nest the result inside another object.
+    - Do not return an "approach" object.
+    - Do not use "selected" instead of "decision".
+
+    Decision-specific requirements:
+    - PASS MUST contain repository-grounded evidence.
+    - REVISION_REQUIRED MUST contain revision_feedback.
+    - REJECT MUST contain concrete issues or a recommendation.
+
+    Return ONLY the JSON object.
     Do not add markdown fences.
-    Do not add any extra text outside the JSON.
+    Do not add explanations before or after the JSON.
     """

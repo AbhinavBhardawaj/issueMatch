@@ -43,3 +43,8 @@ htmlcov/
 .idea/
 
 .agents/
+
+# Temporary editor/system files
+*.swp
+*.swo
+tmp/
