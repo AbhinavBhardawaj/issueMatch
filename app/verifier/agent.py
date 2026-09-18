@@ -1,22 +1,25 @@
 import uuid
 import re
-from typing import Callable
+from typing import Callable, Protocol
 from pydantic import ValidationError
 from app.domain.states import VerificationStatus
 from app.domain.models import Finding, RepoContext, Verification
 from app.verifier.prompts import SYSTEM_PROMPT, build_verifier_prompt
 from app.verifier.schemas import VerifierLLMResponse, LLMInvocationError, MalformedVerifierResponse
 
-def run_verifier(
+class LLMProvider(Protocol):
+    async def complete(self, system: str, user: str) -> str: ...
+
+async def run_verifier(
     finding: Finding, 
     repo_context: RepoContext, 
-    llm_caller: Callable[[str, str], str]
+    llm_provider: LLMProvider
 ) -> Verification:
     
     user_prompt = build_verifier_prompt(finding, repo_context)
     
     try:
-        response_text = llm_caller(SYSTEM_PROMPT, user_prompt)
+        response_text = await llm_provider.complete(SYSTEM_PROMPT, user_prompt)
     except Exception as e:
         raise LLMInvocationError(f"LLM call failed: {str(e)}") from e
         
