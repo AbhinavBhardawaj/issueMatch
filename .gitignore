@@ -43,6 +43,3 @@ htmlcov/
 .idea/
 
 .agents/
-keys/
-get_repo.py
-verify_github_auth.py
