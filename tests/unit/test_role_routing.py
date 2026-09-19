@@ -23,8 +23,10 @@ async def test_scout_nvidia_verifier_groq_routing():
     env = {
         "SCOUT_PROVIDER": "NVIDIA",
         "SCOUT_MODEL_ID": "model-A",
+        "NVIDIA_API_KEY": "mock-nvidia-key",
         "VERIFIER_PROVIDER": "GROQ",
         "VERIFIER_MODEL_ID": "model-B",
+        "GROQ_API_KEY": "mock-groq-key",
     }
     with patch.dict(os.environ, env, clear=True):
         scout_prov = create_scout_provider()
@@ -72,8 +74,10 @@ async def test_reverse_roles_routing():
     env = {
         "SCOUT_PROVIDER": "GROQ",
         "SCOUT_MODEL_ID": "model-B",
+        "GROQ_API_KEY": "mock-groq-key",
         "VERIFIER_PROVIDER": "NVIDIA",
         "VERIFIER_MODEL_ID": "model-A",
+        "NVIDIA_API_KEY": "mock-nvidia-key",
     }
     with patch.dict(os.environ, env, clear=True):
         scout_prov = create_scout_provider()
@@ -116,8 +120,10 @@ async def test_scout_provider_failure_does_not_mutate_verifier_state():
     env = {
         "SCOUT_PROVIDER": "NVIDIA",
         "SCOUT_MODEL_ID": "model-A",
+        "NVIDIA_API_KEY": "mock-nvidia-key",
         "VERIFIER_PROVIDER": "GROQ",
         "VERIFIER_MODEL_ID": "model-B",
+        "GROQ_API_KEY": "mock-groq-key",
     }
     with patch.dict(os.environ, env, clear=True):
         scout_prov = create_scout_provider()
@@ -154,8 +160,10 @@ async def test_verifier_provider_failure_does_not_alter_scout_routing_state():
     env = {
         "SCOUT_PROVIDER": "NVIDIA",
         "SCOUT_MODEL_ID": "model-A",
+        "NVIDIA_API_KEY": "mock-nvidia-key",
         "VERIFIER_PROVIDER": "GROQ",
         "VERIFIER_MODEL_ID": "model-B",
+        "GROQ_API_KEY": "mock-groq-key",
     }
     with patch.dict(os.environ, env, clear=True):
         scout_prov = create_scout_provider()

@@ -108,7 +108,7 @@ async def test_case_1_real_behavioral_bug(base_push_event):
     verifier_json = json.dumps({
         "status": "VERIFIED",
         "reason": "Direct division by len(items) without non-zero check causes crash when empty.",
-        "supporting_evidence": ["return total / count directly executed when items is []"],
+        "supporting_evidence": [{"file": "app/calc.py", "line": 3, "snippet": "return total / count"}],
         "counter_evidence": [],
         "duplicate_issue": False,
         "confidence": 0.95,
@@ -177,7 +177,7 @@ async def test_case_2_false_positive_rejected_by_verifier(base_push_event):
         "status": "REJECTED",
         "reason": "Caller validate_batch explicitly checks items is not empty beforehand.",
         "supporting_evidence": [],
-        "counter_evidence": ["Caller enforces if not items: raise ValueError()"],
+        "counter_evidence": [],
         "duplicate_issue": False,
         "confidence": 0.90,
     })
@@ -444,7 +444,7 @@ async def test_case_7_duplicate_defect_across_runs(base_push_event):
     verifier_json = json.dumps({
         "status": "VERIFIED",
         "reason": "Direct division by zero.",
-        "supporting_evidence": ["return total / count"],
+        "supporting_evidence": [{"file": "app/calc.py", "line": 3, "snippet": "return total / count"}],
         "counter_evidence": [],
         "duplicate_issue": False,
         "confidence": 0.95,
@@ -536,7 +536,7 @@ async def test_case_8_security_bug_held_for_manual_review(base_push_event):
     verifier_json = json.dumps({
         "status": "VERIFIED",
         "reason": "Hardcoded bypass string directly in auth path.",
-        "supporting_evidence": ["if token == 'backdoor_secret': return True"],
+        "supporting_evidence": [{"file": "app/auth.py", "line": 3, "snippet": "if token == 'backdoor_secret': return True"}],
         "counter_evidence": [],
         "duplicate_issue": False,
         "confidence": 0.99,

@@ -148,6 +148,11 @@ PROVIDER_CLASSES = {
 }
 
 
+class ProviderConfigurationError(ValueError):
+    """Raised when an explicitly configured provider lacks a required API key."""
+    pass
+
+
 def get_provider_key(provider_name: str, role: str) -> str:
     role_upper = role.upper()
     role_key = os.environ.get(f"{role_upper}_API_KEY", "").strip()
@@ -171,7 +176,9 @@ def get_provider_key(provider_name: str, role: str) -> str:
             if first_key:
                 return first_key
 
-    return "mock-key"
+    raise ProviderConfigurationError(
+        f"Explicit provider '{provider_name}' configured for role '{role}', but no API key was found in {role_upper}_API_KEY or {key_envs}."
+    )
 
 
 def create_role_provider(

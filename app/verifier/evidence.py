@@ -5,6 +5,7 @@ import pathlib
 from pydantic import BaseModel, ConfigDict
 from app.domain.states import EvidenceStatus
 from app.domain.models import Finding, RepoContext, RepoContextFile
+from app.domain.normalization import normalize_code, normalize_path
 
 class EvidenceItemResult(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -32,8 +33,9 @@ def _can_analyse_functions(file_path: str) -> bool:
     return pathlib.Path(file_path).suffix in ANALYSABLE_EXTENSIONS
 
 def _check_file_exists(file_path: str, files: list[RepoContextFile]) -> tuple[bool, str | None]:
+    norm_target = normalize_path(file_path)
     for f in files:
-        if f.path == file_path:
+        if normalize_path(f.path) == norm_target:
             return True, f.content
     return False, None
 
@@ -47,13 +49,8 @@ def _check_snippet_found(content: str, line: int, snippet: str) -> bool:
     line_idx = line - 1
     start_idx = max(0, line_idx - 5)
     end_idx = min(len(lines), line_idx + 6)
-    
-    snippet_stripped = snippet.strip()
-    
-    for i in range(start_idx, end_idx):
-        if snippet_stripped in lines[i]:
-            return True
-    return False
+    window = "\n".join(lines[start_idx:end_idx])
+    return normalize_code(snippet) in normalize_code(window)
 
 def _check_function_exists(content: str, function_name: str, target_line: int | None = None) -> bool | None:
     try:

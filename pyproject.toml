@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn>=0.29.0",
     "boto3>=1.40",
     "strands-agents[ollama]>=1.56.0,<2.0.0",
+    "aiosqlite>=0.20.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -26,3 +27,5 @@ exclude = ["frontend*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-p no:phoenix"
+

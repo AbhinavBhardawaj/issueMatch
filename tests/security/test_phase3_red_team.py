@@ -491,8 +491,10 @@ def test_attack_p_scout_verifier_provider_isolation():
     env = {
         "SCOUT_PROVIDER": "NVIDIA",
         "SCOUT_MODEL_ID": "model-scout",
+        "NVIDIA_API_KEY": "mock-nvidia-key",
         "VERIFIER_PROVIDER": "GROQ",
         "VERIFIER_MODEL_ID": "model-verifier",
+        "GROQ_API_KEY": "mock-groq-key",
     }
     with patch.dict(os.environ, env, clear=True):
         scout = create_scout_provider()

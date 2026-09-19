@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
 from app.github.events import GitHubPushEvent
-from app.domain.models import Finding, Verification, EvidenceItem, RepoContext, RepoContextFile, ExistingIssue
+from app.domain.models import Finding, Verification, EvidenceItem, RepoContext, RepoContextFile, ExistingIssue, VerifierEvidence
 from app.domain.states import FindingStatus, VerificationStatus, EvidenceStatus
 from app.scout.schemas import ScoutFindingDraft, ScoutEvidenceDraft, ScoutResponse
 from app.scout.models import ContextCompleteness, ScoutContext, ScoutFile, SuppressionReason
@@ -376,7 +376,8 @@ async def test_attack_9_delivery_replay_and_mismatch():
 # ATTACK 10: DUPLICATE ISSUE
 # Same defect across different runs -> dedup prevents second issue creation.
 # ====================================================================
-def test_attack_10_duplicate_defect_suppressed():
+@pytest.mark.asyncio
+async def test_attack_10_duplicate_defect_suppressed():
     store = InMemoryDedupStore()
     f1 = Finding(
         finding_id="F-1",
@@ -391,7 +392,7 @@ def test_attack_10_duplicate_defect_suppressed():
         evidence=[EvidenceItem(file="calc.py", line=1, snippet="x/y")],
         confidence=0.95,
     )
-    r1 = store.check_and_reserve(f1)
+    r1 = await store.check_and_reserve(f1)
     assert r1.is_duplicate is False
 
     # Second run on a later commit with identical defect
@@ -408,7 +409,7 @@ def test_attack_10_duplicate_defect_suppressed():
         evidence=[EvidenceItem(file="calc.py", line=1, snippet="x/y")],
         confidence=0.95,
     )
-    r2 = store.check_and_reserve(f2)
+    r2 = await store.check_and_reserve(f2)
     assert r2.is_duplicate is True
 
 
@@ -444,10 +445,11 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
         status=VerificationStatus.VERIFIED,
         reason="ok",
         confidence=0.9,
+        supporting_evidence=[VerifierEvidence(file="calc.py", line=1, snippet="c")],
     )
     gate = GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
     dedup_store = InMemoryDedupStore()
-    dedup = dedup_store.check_and_reserve(finding)
+    dedup = await dedup_store.check_and_reserve(finding)
 
     client = AsyncMock()
     client.get_repository = AsyncMock(return_value={"id": "2", "name": "repo"})
@@ -485,7 +487,7 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
         owner="org",
         name="repo",
         commit_sha="b" * 40,
-        files=[],
+        files=[RepoContextFile(path="calc.py", content="c\n", size_bytes=2)],
     )
 
     res = await create_issue_if_authorized(
@@ -585,6 +587,7 @@ def test_attack_13_security_findings_held_for_manual_review():
         status=VerificationStatus.VERIFIED,
         reason="Confirmed security bug",
         confidence=0.99,
+        supporting_evidence=[VerifierEvidence(file="db.py", line=10, snippet="query = f'SELECT * FROM users WHERE id={user_input}'")],
     )
     er = EvidenceValidationResult(
         finding_id="F-sec",
@@ -609,7 +612,13 @@ def test_attack_13_security_findings_held_for_manual_review():
         owner="org",
         name="repo",
         commit_sha="b" * 40,
-        files=[],
+        files=[
+            RepoContextFile(
+                path="db.py",
+                content="\n" * 9 + "query = f'SELECT * FROM users WHERE id={user_input}'\n",
+                size_bytes=100,
+            )
+        ],
         readme="",
     )
     from app.services.issue_gate import compute_finding_signature

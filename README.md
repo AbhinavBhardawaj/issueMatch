@@ -369,3 +369,22 @@ python3 -m compileall -q app tests
 * Real Ollama integration test
 
 The two components communicate through the existing shared models and `AnalysisService` contract.
+
+## Issue Scout & Verifier Testing Tiers
+
+The system clearly distinguishes three tiers of end-to-end verification:
+
+### 1. AUTOMATED E2E
+- **Scope:** Synthetic signed webhook delivery + real FastAPI wiring + real SQLite durable queue + real worker + controlled deterministic LLM & GitHub dependencies.
+- **Location:** `tests/integration/test_pipeline_e2e_scenarios.py`
+- **Execution:** Runs in standard CI/local runs (`pytest -q tests/integration/test_pipeline_e2e_scenarios.py`).
+
+### 2. LIVE PROVIDER E2E
+- **Scope:** Real GitHub APIs (authentication, trees, contents, issue writes) + real Scout & Verifier LLM providers.
+- **Location:** `tests/integration/test_live_scout_verifier_e2e.py`
+- **Safety:** Strictly guarded by `RUN_LIVE_SCOUT_E2E=1`, sandbox repository identification check, and explicit permission flags. Skips honestly when credentials are not configured.
+
+### 3. FINAL LIVE ACCEPTANCE
+- **Scope:** Actual `git push` by developer -> actual GitHub App webhook delivery -> SQLite durable queue -> real Scout Agent -> real Verifier Pipeline -> deterministic gate -> real GitHub issue created or rejected.
+- **Runner:** `scripts/run_live_webhook_receiver.py` (receives live webhooks over an exposed tunnel).
+

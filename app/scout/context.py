@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Set
 
+from app.github.client import GitHubNotFoundError
 from app.github.events import GitHubPushEvent
 from app.github.scout_repository import ScoutGitHubReadClient
 from app.scout.models import (
@@ -202,6 +203,8 @@ class ScoutContextBuilder:
 
             tree_paths = [item["path"] for item in tree_items if "path" in item]
         except Exception:
+            completeness = ContextCompleteness.PARTIAL
+            partial_reasons.append("TREE_LOOKUP_FAILED")
             tree_paths = []
 
         related_count = 0
@@ -276,7 +279,11 @@ class ScoutContextBuilder:
                 completeness = ContextCompleteness.PARTIAL
                 partial_reasons.append("README_TRUNCATED")
             total_bytes += len(readme_content.encode("utf-8"))
+        except GitHubNotFoundError:
+            readme_content = ""
         except Exception:
+            completeness = ContextCompleteness.PARTIAL
+            partial_reasons.append("README_FETCH_FAILED")
             readme_content = ""
 
         # 4. Collect Existing Open Issues
@@ -299,6 +306,8 @@ class ScoutContextBuilder:
                     )
                 )
         except Exception:
+            completeness = ContextCompleteness.PARTIAL
+            partial_reasons.append("ISSUES_FETCH_FAILED")
             existing_issues = []
 
         return ScoutContext(

@@ -32,8 +32,25 @@ class Finding(BaseModel):
     expected_behavior: str
     evidence: list[EvidenceItem] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
+    claim_scope: str = "local"
+    depends_on_absence: bool = False
     status: FindingStatus = FindingStatus.DISCOVERED
     created_at: str = ""
+
+class VerifierEvidence(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    file: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    snippet: str = Field(min_length=1)
+
+    @field_validator("file", "snippet")
+    @classmethod
+    def reject_whitespace_only(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Field cannot be empty or whitespace-only")
+        return v.strip()
+
 
 class Verification(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -45,8 +62,8 @@ class Verification(BaseModel):
     commit_sha: str
     status: VerificationStatus
     reason: str
-    supporting_evidence: list[dict | str] = Field(default_factory=list)
-    counter_evidence: list[dict | str] = Field(default_factory=list)
+    supporting_evidence: list[VerifierEvidence] = Field(default_factory=list)
+    counter_evidence: list[VerifierEvidence] = Field(default_factory=list)
     duplicate_issue: bool = False
     confidence: float = Field(ge=0, le=1)
     verified_at: str = ""

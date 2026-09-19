@@ -161,7 +161,7 @@ async def test_d_verifier_verified_post_recheck_fails_verifying_to_rejected(
     verifier_json = json.dumps({
         "status": "VERIFIED",
         "reason": "Vulnerability confirmed by verifier",
-        "supporting_evidence": ["jwt.decode"],
+        "supporting_evidence": [{"file": "src/auth.py", "line": 82, "snippet": "decoded = jwt.decode(...)"}],
         "counter_evidence": [],
         "duplicate_issue": False,
         "confidence": 0.95,
@@ -211,7 +211,7 @@ async def test_e_verified_finding_uses_installation_specific_write_client(
     verifier_json = json.dumps({
         "status": "VERIFIED",
         "reason": "Bug verified",
-        "supporting_evidence": ["decoded = jwt.decode(...)"],
+        "supporting_evidence": [{"file": "src/auth.py", "line": 82, "snippet": "decoded = jwt.decode(...)"}],
         "counter_evidence": [],
         "duplicate_issue": False,
         "confidence": 0.95,
@@ -312,7 +312,7 @@ async def test_f_concurrent_pushes_use_different_installation_clients_no_leakage
     verifier_json = json.dumps({
         "status": "VERIFIED",
         "reason": "Confirmed",
-        "supporting_evidence": ["return 42"],
+        "supporting_evidence": [{"file": "main.py", "line": 2, "snippet": "return 42"}],
         "counter_evidence": [],
         "duplicate_issue": False,
         "confidence": 0.95,
