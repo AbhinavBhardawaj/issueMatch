@@ -1,4 +1,7 @@
 import os
+import time
+import jwt
+import httpx
 import pytest
 from dotenv import load_dotenv
 load_dotenv()
@@ -9,6 +12,28 @@ from app.github.repo_fetcher import fetch_repo_context
 from app.verifier.evidence import validate_evidence
 from app.infrastructure.llm_router import load_providers, MultiLLMProvider
 from app.services.pipeline import VerifierPipeline
+
+def get_installation_token():
+    """Helper to dynamically generate a token using the private key."""
+    token = os.environ.get("GH_INSTALLATION_TOKEN")
+    if token:
+        return token
+        
+    try:
+        app_id = "4991882"
+        installation_id = "162794652"
+        private_key = open("keys/verifier-bot.pem").read()
+        
+        payload = {"iat": int(time.time()), "exp": int(time.time()) + 600, "iss": app_id}
+        encoded = jwt.encode(payload, private_key, algorithm="RS256")
+        resp = httpx.post(
+            f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+            headers={"Authorization": f"Bearer {encoded}", "Accept": "application/vnd.github+json"}
+        )
+        return resp.json()["token"]
+    except Exception as e:
+        print(f"Failed to generate token: {e}")
+        return None
 
 def get_sample_finding():
     return dict(
@@ -40,13 +65,13 @@ def get_sample_finding():
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    not os.environ.get("GH_INSTALLATION_TOKEN"),
-    reason="Integration test requires real GitHub credentials"
+    not get_installation_token(),
+    reason="Integration test requires real GitHub credentials (keys/verifier-bot.pem missing)"
 )
 async def test_e2e_creates_issue_in_nitiflow():
     owner = "koushiksuresh27"
     repo_name = "NitiFlow"
-    token = os.environ["GH_INSTALLATION_TOKEN"]
+    token = get_installation_token()
 
     finding = Finding(**get_sample_finding())
     client = GitHubRestClient(token=token)
@@ -94,13 +119,13 @@ def get_false_positive_finding():
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    not os.environ.get("GH_INSTALLATION_TOKEN"),
-    reason="Integration test requires real GitHub credentials"
+    not get_installation_token(),
+    reason="Integration test requires real GitHub credentials (keys/verifier-bot.pem missing)"
 )
 async def test_e2e_rejects_false_positive():
     owner = "koushiksuresh27"
     repo_name = "NitiFlow"
-    token = os.environ["GH_INSTALLATION_TOKEN"]
+    token = get_installation_token()
 
     finding = Finding(**get_false_positive_finding())
     client = GitHubRestClient(token=token)
