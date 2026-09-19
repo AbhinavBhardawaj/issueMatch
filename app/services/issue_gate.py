@@ -228,8 +228,7 @@ def evaluate_issue_authorization(
         return GateResult(decision=GateDecision.DENY, reason="DEDUP_RESERVATION_MISMATCH")
         
     expected_signature = compute_finding_signature(finding)
-    legacy_signature = normalized_finding_signature(finding.repository_id, finding.file, finding.function, finding.description)
-    if dedup_result.signature not in (expected_signature, legacy_signature):
+    if dedup_result.signature != expected_signature:
         return GateResult(decision=GateDecision.DENY, reason="SIGNATURE_MISMATCH")
         
     if verification.duplicate_issue or check_existing_github_issues(finding, repo_context.existing_issues):

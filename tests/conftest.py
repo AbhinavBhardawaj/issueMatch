@@ -5,7 +5,7 @@ from app.domain.models import (
     RepoContext, RepoContextFile, ExistingIssue
 )
 from app.verifier.evidence import EvidenceItemResult, EvidenceValidationResult
-from app.services.issue_gate import GateResult, GateDecision, DedupResult, normalized_finding_signature
+from app.services.issue_gate import GateResult, GateDecision, DedupResult, normalized_finding_signature, compute_finding_signature
 
 @pytest.fixture
 def make_finding():
@@ -187,7 +187,7 @@ def make_dedup_result(make_finding):
         f = finding or make_finding()
         
         # Auto-compute the correct deterministic signature for the finding
-        sig = normalized_finding_signature(f.repository_id, f.file, f.function, f.description)
+        sig = compute_finding_signature(f)
         
         defaults = {
             "signature": sig,

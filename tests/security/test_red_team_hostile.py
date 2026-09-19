@@ -15,7 +15,7 @@ from app.services.pipeline import VerifierPipeline
 from app.services.issue_gate import InMemoryDedupStore, should_create_issue, GateDecision, GateResult, DedupResult
 from app.services.issue_creator import create_issue_if_authorized, Unauthorized
 from app.storage.delivery_store import InMemoryDeliveryStore, DeliveryClaimStatus
-from app.verifier.evidence import validate_evidence
+from app.verifier.evidence import validate_evidence, EvidenceValidationResult, EvidenceItemResult
 from app.verifier.schemas import VerifierLLMResponse
 from app.infrastructure.llm_router import LLMProvider
 from app.main import create_app
@@ -458,7 +458,37 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
     client.get_issues = AsyncMock(return_value=[])
     client.create_issue.side_effect = GitHubAmbiguousWriteError("Timeout during issue creation POST")
 
-    res = await create_issue_if_authorized(gate, dedup, finding, v, client, "org", "repo")
+    from app.verifier.evidence import EvidenceValidationResult, EvidenceItemResult
+
+    er = EvidenceValidationResult(
+        finding_id=finding.finding_id,
+        commit_sha=finding.commit_sha,
+        results=[
+            EvidenceItemResult(
+                file="calc.py",
+                line=1,
+                snippet="c",
+                file_exists=True,
+                line_exists=True,
+                snippet_found=True,
+                function_exists=True,
+                status=EvidenceStatus.SUPPORTED,
+            )
+        ],
+        overall=EvidenceStatus.SUPPORTED,
+    )
+    rc = RepoContext(
+        repository_id="2",
+        installation_id="1",
+        owner="org",
+        name="repo",
+        commit_sha="b" * 40,
+        files=[],
+    )
+
+    res = await create_issue_if_authorized(
+        gate, dedup, finding, v, client, "org", "repo", evidence_result=er, repo_context=rc
+    )
     assert res.issue_number == 42
     assert res.was_existing is True
     # Exactly one create_issue attempt occurred, then ambiguous timeout was caught and reconciled
@@ -501,8 +531,25 @@ async def test_attack_12_forged_gate_rejected_by_issue_creator():
     forged_gate = GateResult(decision=GateDecision.ALLOW, reason="FORGED")
     dedup = DedupResult(signature="sig", finding_id="F-real", is_duplicate=False, reason="new")
 
+    er = EvidenceValidationResult(
+        finding_id=finding.finding_id,
+        commit_sha=finding.commit_sha,
+        results=[],
+        overall=EvidenceStatus.CONTRADICTED,
+    )
+    rc = RepoContext(
+        repository_id="2",
+        installation_id="1",
+        owner="org",
+        name="repo",
+        commit_sha="b" * 40,
+        files=[],
+    )
+
     with pytest.raises(Unauthorized):
-        await create_issue_if_authorized(forged_gate, dedup, finding, v_rejected, client, "org", "repo")
+        await create_issue_if_authorized(
+            forged_gate, dedup, finding, v_rejected, client, "org", "repo", evidence_result=er, repo_context=rc
+        )
     client.create_issue.assert_not_called()
 
 
@@ -516,13 +563,13 @@ def test_attack_13_security_findings_held_for_manual_review():
         installation_id="1",
         repository_id="2",
         commit_sha="b" * 40,
-        title="SQL Injection",
+        title="SQL injection",
         severity="critical",
         category="security",
         file="db.py",
-        description="execute raw SQL query directly",
-        expected_behavior="parameterized queries",
-        evidence=[EvidenceItem(file="db.py", line=1, snippet="cursor.execute(sql)")],
+        description="Vulnerable SQL query",
+        expected_behavior="Parameterized query",
+        evidence=[EvidenceItem(file="db.py", line=10, snippet="query = f'SELECT * FROM users WHERE id={user_input}'")],
         confidence=0.99,
     )
     v = Verification(
@@ -532,10 +579,15 @@ def test_attack_13_security_findings_held_for_manual_review():
         repository_id="2",
         commit_sha="b" * 40,
         status=VerificationStatus.VERIFIED,
-        reason="Confirmed vulnerability",
+        reason="Confirmed security bug",
         confidence=0.99,
     )
-    er = MagicMock(overall=EvidenceStatus.SUPPORTED, results=[])
+    er = EvidenceValidationResult(
+        finding_id="F-sec",
+        commit_sha="b" * 40,
+        results=[],
+        overall=EvidenceStatus.SUPPORTED,
+    )
     rc = RepoContext(
         repository_id="2",
         installation_id="1",
@@ -545,8 +597,8 @@ def test_attack_13_security_findings_held_for_manual_review():
         files=[],
         readme="",
     )
-    from app.services.issue_gate import normalized_finding_signature
-    sig = normalized_finding_signature(finding.repository_id, finding.file, finding.function, finding.description)
+    from app.services.issue_gate import compute_finding_signature
+    sig = compute_finding_signature(finding)
     dr = DedupResult(signature=sig, finding_id="F-sec", is_duplicate=False, reason="new")
 
     res = should_create_issue(finding, v, er, rc, dr)

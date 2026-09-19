@@ -14,6 +14,7 @@ from app.services.issue_gate import (
     InMemoryDedupStore,
     compute_defect_signature,
     compute_finding_signature,
+    normalized_finding_signature,
     evaluate_issue_authorization,
     should_create_issue,
 )
@@ -23,6 +24,7 @@ from app.services.issue_creator import (
     Unauthorized,
     IssueCreationResult,
     IssueCreationError,
+    ReconciliationUnavailableError,
 )
 from app.github.client import (
     GitHubAmbiguousWriteError,
@@ -30,6 +32,7 @@ from app.github.client import (
     GitHubRateLimitError,
     GitHubAuthenticationError,
     GitHubServerError,
+    GitHubRequestTimeoutError,
 )
 from app.services.pipeline import VerifierPipeline
 from app.scout.agent import ScoutAgent
@@ -404,3 +407,167 @@ async def test_valid_issue_creation_exactly_one_call(
     assert result.was_existing is False
     assert result.issue_number == 1001
     assert client.create_issue.call_count == 1
+
+
+# ===========================================================================
+# 8. MANDATORY REAL EVIDENCE AND REPO CONTEXT BOUNDARY ATTACKS
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_issue_creator_rejects_omitted_evidence_result(
+    make_finding, make_verification, make_repo_context
+):
+    """Omitting evidence_result must fail immediately; create_issue never called."""
+    f = make_finding()
+    v = make_verification(finding=f)
+    rc = make_repo_context()
+    sig = compute_finding_signature(f)
+    dr = DedupResult(signature=sig, finding_id=f.finding_id, is_duplicate=False, reason="ok")
+
+    client = AsyncMock()
+    forged_gate = GateResult(decision=GateDecision.ALLOW, reason="FORGED")
+
+    # A) Omit keyword argument entirely
+    with pytest.raises((TypeError, Unauthorized)):
+        await create_issue_if_authorized(
+            forged_gate, dr, f, v, client, "test-owner", "test-repo",
+            repo_context=rc  # evidence_result omitted
+        )
+    client.create_issue.assert_not_called()
+
+    # B) Pass None explicitly
+    with pytest.raises(Unauthorized):
+        await create_issue_if_authorized(
+            forged_gate, dr, f, v, client, "test-owner", "test-repo",
+            evidence_result=None,
+            repo_context=rc
+        )
+    client.create_issue.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_issue_creator_rejects_omitted_repo_context(
+    make_finding, make_verification, make_evidence_result
+):
+    """Omitting repo_context must fail immediately; create_issue never called."""
+    f = make_finding()
+    v = make_verification(finding=f)
+    er = make_evidence_result(finding=f)
+    sig = compute_finding_signature(f)
+    dr = DedupResult(signature=sig, finding_id=f.finding_id, is_duplicate=False, reason="ok")
+
+    client = AsyncMock()
+    forged_gate = GateResult(decision=GateDecision.ALLOW, reason="FORGED")
+
+    # A) Omit keyword argument entirely
+    with pytest.raises((TypeError, Unauthorized)):
+        await create_issue_if_authorized(
+            forged_gate, dr, f, v, client, "test-owner", "test-repo",
+            evidence_result=er  # repo_context omitted
+        )
+    client.create_issue.assert_not_called()
+
+    # B) Pass None explicitly
+    with pytest.raises(Unauthorized):
+        await create_issue_if_authorized(
+            forged_gate, dr, f, v, client, "test-owner", "test-repo",
+            evidence_result=er,
+            repo_context=None
+        )
+    client.create_issue.assert_not_called()
+
+
+# ===========================================================================
+# 9. RECONCILIATION OPERATIONAL FAILURE: FAIL CLOSED
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_reconciliation_failure_both_reads_timeout_fails_closed(
+    make_finding, make_verification, make_evidence_result, make_repo_context
+):
+    """If both search_issues and get_issues time out, do NOT proceed to create_issue."""
+    f = make_finding()
+    v = make_verification(finding=f)
+    er = make_evidence_result(finding=f)
+    rc = make_repo_context()
+    sig = compute_finding_signature(f)
+    dr = DedupResult(signature=sig, finding_id=f.finding_id, is_duplicate=False, reason="ok")
+
+    client = AsyncMock()
+    client.search_issues.side_effect = GitHubRequestTimeoutError("search timeout")
+    client.get_issues.side_effect = GitHubRequestTimeoutError("get_issues timeout")
+
+    gate = GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
+    with pytest.raises((ReconciliationUnavailableError, IssueCreationError)):
+        await create_issue_if_authorized(
+            gate, dr, f, v, client, "test-owner", "test-repo",
+            evidence_result=er, repo_context=rc
+        )
+
+    client.create_issue.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_search_fails_but_recent_listing_succeeds(
+    make_finding, make_verification, make_evidence_result, make_repo_context
+):
+    """If search fails but recent listing succeeds with empty list, normal POST may continue."""
+    f = make_finding()
+    v = make_verification(finding=f)
+    er = make_evidence_result(finding=f)
+    rc = make_repo_context()
+    sig = compute_finding_signature(f)
+    dr = DedupResult(signature=sig, finding_id=f.finding_id, is_duplicate=False, reason="ok")
+
+    client = AsyncMock()
+    client.search_issues.side_effect = GitHubRequestTimeoutError("search timeout")
+    client.get_issues.return_value = []
+    client.create_issue.return_value = {"number": 1002, "body": "created"}
+
+    gate = GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
+    result = await create_issue_if_authorized(
+        gate, dr, f, v, client, "test-owner", "test-repo",
+        evidence_result=er, repo_context=rc
+    )
+
+    assert result.was_existing is False
+    assert result.issue_number == 1002
+    assert client.create_issue.call_count == 1
+
+
+# ===========================================================================
+# 10. LEGACY SIGNATURE REMOVED FROM WRITE AUTHORIZATION
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_legacy_signature_rejected_by_write_authorization(
+    make_finding, make_verification, make_evidence_result, make_repo_context
+):
+    """A legacy description-based signature cannot authorize a new write."""
+    f = make_finding()
+    v = make_verification(finding=f)
+    er = make_evidence_result(finding=f)
+    rc = make_repo_context()
+
+    # Create a valid legacy description signature that differs from compute_finding_signature
+    legacy_sig = normalized_finding_signature(f.repository_id, f.file, f.function, f.description)
+    auth_sig = compute_finding_signature(f)
+    # Ensure they are distinct in this test setup
+    dr = DedupResult(signature=legacy_sig, finding_id=f.finding_id, is_duplicate=False, reason="ok")
+
+    # Check evaluate_issue_authorization directly
+    gate_decision = evaluate_issue_authorization(f, v, er, rc, dr)
+    assert gate_decision.decision == GateDecision.DENY
+    assert gate_decision.reason == "SIGNATURE_MISMATCH"
+
+    # Check direct IssueCreator boundary
+    client = AsyncMock()
+    forged_gate = GateResult(decision=GateDecision.ALLOW, reason="FORGED")
+    with pytest.raises(Unauthorized):
+        await create_issue_if_authorized(
+            forged_gate, dr, f, v, client, "test-owner", "test-repo",
+            evidence_result=er, repo_context=rc
+        )
+
+    client.create_issue.assert_not_called()
+

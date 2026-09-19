@@ -43,6 +43,9 @@ class IssueCreationError(Exception):
 class Unauthorized(IssueCreationError):
     pass
 
+class ReconciliationUnavailableError(IssueCreationError):
+    pass
+
 class GitHubAPIError(Exception):
     def __init__(self, message: str, status_code: int, retry_after: int = 0):
         super().__init__(message)
@@ -99,10 +102,14 @@ async def reconcile_existing_issue(
     sig_marker = _build_signature_marker(signature) if signature else ""
     finding_marker = _build_reconciliation_marker(finding.finding_id, verification.verification_id)
 
+    search_ok = False
+    search_err = None
+
     # 1. Primary reconciliation: search issues (by signature if present, else by finding marker)
     query = f"opencontrib:signature:{signature}" if signature else f"opencontrib:finding:{finding.finding_id}"
     try:
         issues = await github_client.search_issues(owner, repo_name, query)
+        search_ok = True
         for issue in issues:
             body = issue.get("body", "")
             if sig_marker and sig_marker in body:
@@ -110,12 +117,18 @@ async def reconcile_existing_issue(
             if finding_marker and finding_marker in body:
                 return issue
     except Exception as exc:
-        logger.debug(f"Search issues failed: {exc}")
+        search_err = exc
+        logger.warning(f"Search issues failed: {exc}")
 
     # 2. Bounded fallback: inspect recent issues directly to handle search index delay
-    if hasattr(github_client, "get_issues"):
+    recent_ok = False
+    recent_err = None
+    has_recent_capability = hasattr(github_client, "get_issues")
+
+    if has_recent_capability:
         try:
             recent_issues = await github_client.get_issues(owner, repo_name, state="all", per_page=30)
+            recent_ok = True
             for issue in recent_issues:
                 body = issue.get("body", "")
                 if sig_marker and sig_marker in body:
@@ -123,8 +136,17 @@ async def reconcile_existing_issue(
                 if finding_marker and finding_marker in body:
                     return issue
         except Exception as exc:
-            logger.debug(f"Recent issues fallback failed: {exc}")
+            recent_err = exc
+            logger.warning(f"Recent issues fallback failed: {exc}")
 
+    # If both reconciliation mechanisms failed operationally (or search failed and no get_issues supported):
+    if not search_ok and (not has_recent_capability or not recent_ok):
+        err_msg = f"Reconciliation unavailable: search error ({search_err})"
+        if recent_err:
+            err_msg += f", get_issues error ({recent_err})"
+        raise ReconciliationUnavailableError(err_msg)
+
+    # At least one mechanism succeeded and confirmed no matching issue exists
     return None
 
 # Aliases for reconciliation
@@ -140,50 +162,16 @@ async def create_issue_if_authorized(
     owner: str, 
     repo_name: str,
     *,
-    evidence_result: EvidenceValidationResult | None = None,
-    repo_context: RepoContext | None = None,
+    evidence_result: EvidenceValidationResult,
+    repo_context: RepoContext,
 ) -> IssueCreationResult:
     # 0. Reject caller-supplied DENY immediately
     if gate_result.decision != GateDecision.ALLOW:
         raise Unauthorized(f"Gate denied issue creation: {gate_result.reason}")
 
-    # 1. Ensure evidence_result and repo_context are available
-    if evidence_result is None:
-        if not finding.evidence:
-            items = []
-            overall = EvidenceStatus.CONTRADICTED
-        else:
-            items = [
-                EvidenceItemResult(
-                    file=ev.file,
-                    line=ev.line,
-                    snippet=ev.snippet,
-                    file_exists=True,
-                    line_exists=True,
-                    snippet_found=True,
-                    function_exists=True,
-                    status=EvidenceStatus.SUPPORTED,
-                )
-                for ev in finding.evidence
-            ]
-            overall = EvidenceStatus.SUPPORTED
-        evidence_result = EvidenceValidationResult(
-            finding_id=finding.finding_id,
-            commit_sha=finding.commit_sha,
-            results=items,
-            overall=overall,
-        )
-
-    if repo_context is None:
-        repo_context = RepoContext(
-            repository_id=finding.repository_id,
-            installation_id=finding.installation_id,
-            owner=owner,
-            name=repo_name,
-            commit_sha=finding.commit_sha,
-            files=[],
-            existing_issues=[],
-        )
+    # 1. Require genuine non-null evidence_result and repo_context
+    if evidence_result is None or repo_context is None:
+        raise Unauthorized("Valid evidence_result and repo_context are mandatory for write authorization")
 
     # 2. Defense-in-depth: Re-evaluate pure deterministic authorization policy
     auth_gate = evaluate_issue_authorization(

@@ -280,7 +280,7 @@ def test_gate_deny_dedup_reservation_mismatch(make_finding, make_verification, m
 import pytest
 from app.domain.states import VerificationStatus, EvidenceStatus
 from app.verifier.evidence import EvidenceItemResult, EvidenceValidationResult
-from app.services.issue_gate import DedupResult, normalized_finding_signature
+from app.services.issue_gate import DedupResult, normalized_finding_signature, compute_finding_signature
 from app.services.issue_gate import should_create_issue, GateDecision
 
 # GF1
@@ -291,7 +291,7 @@ def test_gate_e2e_allow(make_finding, make_verification, make_evidence_result, m
     rc = make_repo_context()
     
     # Needs a realistic DedupResult to pass condition 10 (signature check)
-    signature = normalized_finding_signature(f.repository_id, f.file, f.function, f.description)
+    signature = compute_finding_signature(f)
     dr = DedupResult(
         signature=signature,
         finding_id=f.finding_id,
@@ -322,7 +322,7 @@ def test_gate_e2e_contradicted_evidence(make_finding, make_verification, make_re
         overall=EvidenceStatus.CONTRADICTED
     )
     
-    signature = normalized_finding_signature(f.repository_id, f.file, f.function, f.description)
+    signature = compute_finding_signature(f)
     dr = DedupResult(signature=signature, finding_id=f.finding_id, is_duplicate=False, reason="New")
     
     res = should_create_issue(f, v, er, rc, dr)
@@ -336,7 +336,7 @@ def test_gate_e2e_duplicate(make_finding, make_verification, make_evidence_resul
     er = make_evidence_result(finding=f)
     rc = make_repo_context()
     
-    signature = normalized_finding_signature(f.repository_id, f.file, f.function, f.description)
+    signature = compute_finding_signature(f)
     dr = DedupResult(
         signature=signature,
         finding_id=f.finding_id,
