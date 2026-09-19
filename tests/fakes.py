@@ -4,6 +4,7 @@ from app.models.analysis import AnalysisDecision, ApproachAnalysis
 class FakeGitHubClient:
     def __init__(self, fail: bool = False, files: dict[str, str] | None = None): 
         self.fail, self.files = fail, files or {"src/auth/session.py": "def timeout(): pass", "tests/test_session.py": "def test_timeout(): pass"}
+        self.comments: list[str] = []
 
     def _check(self):
         if self.fail: raise RuntimeError("GitHub unavailable")
@@ -13,7 +14,9 @@ class FakeGitHubClient:
     async def get_languages(self, *args): self._check(); return {"Python": 20}
     async def get_repository_tree(self, *args): self._check(); return ([{"type": "blob", "path": p} for p in self.files], False)
     async def get_file_content(self, owner, repo, path, ref): self._check(); return self.files[path]
-    async def create_issue_comment(self, *args): return {"id": 1}
+    async def create_issue_comment(self, owner, repo, number, body):
+        self.comments.append(body)
+        return {"id": 1}
 
 class FakeAnalysisService:
     def __init__(self, fail=False): self.calls = []; self.fail = fail

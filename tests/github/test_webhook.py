@@ -7,7 +7,10 @@ from app.main import create_app
 from tests.fakes import FakeGitHubClient, FakeAnalysisService
 
 def body(action="created"):
-    return json.dumps({"action":action,"repository":{"name":"repo","owner":{"login":"org"}},"issue":{"number":1,"title":"x"},"comment":{"id":1,"body":"thanks","user":{"login":"u"}}}).encode()
+    return json.dumps({"action":action,"repository":{"name":"repo","owner":{"login":"org"},"default_branch":"main"},"issue":{"number":1,"title":"x"},"comment":{"id":1,"body":"thanks","user":{"login":"u"}}}).encode()
+
+def assignment_body(action="unassigned"):
+    return json.dumps({"action": action, "repository": {"name": "repo", "owner": {"login": "org"}, "default_branch": "main"}, "issue": {"number": 1, "title": "x"}, "assignee": {"login": "alice", "id": 9}, "installation": {"id": 1}}).encode()
 class WebhookTests(unittest.TestCase):
     def setUp(self):
         self.repository=InMemoryCandidateRepository(); self.analyzer=FakeAnalysisService()
@@ -26,6 +29,10 @@ class WebhookTests(unittest.TestCase):
         raw=body().replace(b"thanks", b"I'd like to work on this. I will modify src/auth/session.py")
         self.assertEqual(self.client.post("/webhooks/github",content=raw,headers=self._headers(raw)).status_code,202)
         self.assertEqual(len(self.analyzer.calls), 1)
+    def test_assignment_events_are_accepted(self):
+        raw = assignment_body()
+        headers = self._headers(raw, event="issues")
+        self.assertEqual(self.client.post("/webhooks/github", content=raw, headers=headers).status_code, 202)
 
     def test_invalid_or_missing_signature_rejected(self):
         raw=body(); self.assertEqual(self.client.post("/webhooks/github",content=raw,headers=self._headers(raw,False)).status_code,401)

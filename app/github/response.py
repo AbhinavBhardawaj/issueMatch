@@ -11,9 +11,14 @@ def _escape(value: str) -> str: return _MD.sub(r"\\\1", value or "")
 def render_candidate_analysis(candidate: CandidateSubmission, analysis: ApproachAnalysis) -> str:
     """Render data as Markdown, never as executable instructions or assignment commands."""
     username = re.sub(r"[^A-Za-z0-9-]", "", candidate.contributor_username) or "contributor"
-    lines = [f"Candidate: @{username}", "", f"Analysis: {analysis.decision.value}", ""]
+    decision_label = {
+        AnalysisDecision.PASS: "ACCEPTED",
+        AnalysisDecision.REVISION_REQUIRED: "REVISION_REQUIRED",
+        AnalysisDecision.REJECT: "DECLINED",
+    }[analysis.decision]
+    lines = [f"Candidate: @{username}", "", f"Status - {decision_label}", ""]
     if analysis.decision is AnalysisDecision.PASS:
-        lines.extend(["Evidence:", *[f"- {_escape(item)}" for item in analysis.evidence], "", f"Recommendation: {_escape(analysis.recommendation) or 'Maintainer may assign this issue to the contributor.'}"])
+        lines.extend(["Evidence:", *[f"- {_escape(item)}" for item in analysis.evidence], "", f"Recommendation: {_escape(analysis.recommendation) or 'Maintainer may assign this issue to the contributor.'}", "", "The maintainer decides whether to assign the issue."])
     elif analysis.decision is AnalysisDecision.REVISION_REQUIRED:
         lines.extend(["Feedback:", _escape(analysis.revision_feedback), "", "Please revise your approach and submit it again."])
     else:

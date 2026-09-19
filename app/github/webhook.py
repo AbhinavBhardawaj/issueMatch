@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
 from app.candidates.service import CandidateService
-from app.github.events import MalformedGitHubEvent, normalize_issue_comment_created
+from app.github.events import MalformedGitHubEvent, normalize_issue_assignment, normalize_issue_comment_created
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,15 @@ def create_github_webhook_router(webhook_secret: str, candidate_service: Candida
         if event_name not in {"issues", "issue_comment"}: return {"status": "ignored"}
         try: payload = json.loads(raw_body)
         except json.JSONDecodeError: raise HTTPException(status_code=400, detail="Malformed JSON payload")
-        if event_name == "issues": return {"status": "ignored"}
+        if event_name == "issues":
+            if payload.get("action") not in {"assigned", "unassigned"}:
+                return {"status": "ignored"}
+            try:
+                assignment = normalize_issue_assignment(payload, delivery_id)
+            except MalformedGitHubEvent:
+                raise HTTPException(status_code=400, detail="Malformed issue assignment event")
+            background_tasks.add_task(candidate_service.process_issue_assignment, assignment)
+            return {"status": "accepted"}
         if payload.get("action") != "created": return {"status": "ignored"}
         try: normalized = normalize_issue_comment_created(payload, delivery_id)
         except MalformedGitHubEvent: raise HTTPException(status_code=400, detail="Malformed issue comment event")

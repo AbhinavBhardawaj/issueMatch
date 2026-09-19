@@ -228,7 +228,7 @@ Developer A owns the persistent candidate storage and production application wir
 
 The current `InMemoryCandidateRepository` is intentionally limited to local development and tests.
 
-Developer A's production integration should connect:
+The production factory now connects:
 
 ```text
 Persistent CandidateRepository
@@ -241,6 +241,35 @@ CandidateService
         ↓
 GitHub webhook
 ```
+
+Start it with:
+
+```bash
+uvicorn app.main:create_production_app --factory --host 0.0.0.0 --port 8000
+```
+
+`create_production_app()` reads the GitHub App configuration, makes an
+installation-scoped GitHub client per webhook delivery, creates Developer B's
+analysis service through `create_analysis_service()`, and injects all of those
+dependencies into `CandidateService`.
+
+By default it requires a DynamoDB table via `DYNAMODB_TABLE`. The table needs
+`pk` (string) as its partition key, `sk` (string) as its sort key, and an
+`issue-key-index` global secondary index with `issue_key` as its partition key.
+
+One example table setup is:
+
+```bash
+aws dynamodb create-table \
+  --table-name issue-match-candidates \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S AttributeName=issue_key,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+  --global-secondary-indexes '[{"IndexName":"issue-key-index","KeySchema":[{"AttributeName":"issue_key","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"},"ProvisionedThroughput":{"ReadCapacityUnits":5,"WriteCapacityUnits":5}}]' \
+  --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5
+```
+
+For a one-process local demo only, set `ISSUEMATCH_STORAGE=memory`; this mode
+loses candidate state on restart and must not be used for production.
 
 Developer A does not need to interact with the internal Strands/Ollama implementation.
 
@@ -318,12 +347,34 @@ python3 -m compileall -q app tests
 
 No output indicates successful compilation.
 
+## End-to-end GitHub App demo
+
+1. Create a GitHub App, install it only on a throwaway demo repository, subscribe
+   it to the `Issue comments` and `Issues` events, and give it **Issues: Read & write** and
+   **Contents: Read-only** repository permissions. Save the App ID, generated
+   private key, and webhook secret outside this repository.
+2. Install dependencies in a Python 3.11+ virtual environment, start Ollama and
+   pull a model, then expose port 8000 through an HTTPS tunnel such as ngrok or
+   Cloudflare Tunnel. Configure the GitHub App webhook URL as
+   `https://YOUR-TUNNEL/webhooks/github`.
+3. For a temporary local demonstration, export `ISSUEMATCH_STORAGE=memory` plus
+   `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `OLLAMA_HOST`,
+   and `OLLAMA_MODEL`; then start the production factory command above.
+4. Create an issue in the installed repository and comment: `I'd like to work on
+   this. I will modify src/example.py and update tests/test_example.py.` The bot
+   fetches only the relevant GitHub context, calls Ollama, and posts its structured
+   recommendation as a new issue comment.
+5. Inspect the GitHub App's **Advanced → Recent deliveries** screen to diagnose
+   non-2xx webhook responses or redeliver a test event.
+
+Never commit the private key, webhook secret, AWS credentials, or tunnel URL.
+
 ## Current Verification
 
-Developer B's analysis implementation has been verified with:
+Developer B's analysis implementation was reported as verified with:
 
 ```text
-39 passed, 1 skipped
+40 passed, 1 skipped
 ```
 
 The real Ollama integration test has also been verified separately with:
@@ -369,3 +420,23 @@ python3 -m compileall -q app tests
 * Real Ollama integration test
 
 The two components communicate through the existing shared models and `AnalysisService` contract.
+
+## Candidate evaluation policy
+
+The extractor separates `CLAIM_ONLY` from `APPROACH_SUBMITTED`. Messages such as
+`Assign this issue to me` or `I would like to work on this issue` are recorded as
+ignored deliveries and never invoke Strands/Ollama or receive a bot comment. A
+comment with implementation substance—natural language, a function/class plan,
+file references, logic, or pseudocode—is eligible for analysis.
+
+Valid approaches receive an increasing issue-local priority. A `PASS` analysis is
+stored as `ACCEPTED` and becomes the issue's `CANDIDATE_RECOMMENDED` candidate;
+newer approaches are stored as waiting and are not analyzed while that candidate
+is selected or assigned. `REVISION_REQUIRED` and `REJECT`/`DECLINED` do not block
+later approaches. A revised comment from the same contributor is a new candidate
+linked through `parent_candidate_id`.
+
+The `issues.assigned` and `issues.unassigned` webhooks update assignment state.
+Unassignment clears the recommendation and resumes the oldest waiting approach;
+if no eligible approach remains, the issue returns to `WAITING_FOR_CANDIDATES`.
+The bot only recommends contributors and never invokes GitHub's assignment API.

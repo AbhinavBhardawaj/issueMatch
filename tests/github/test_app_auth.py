@@ -1,4 +1,4 @@
-import os, unittest
+import os, sys, types, unittest
 from unittest.mock import patch
 import httpx
 from app.github.app_auth import GitHubAppAuthenticator, GitHubAppConfig, GitHubConfigurationError
@@ -19,3 +19,14 @@ class InstallationTokenTests(unittest.IsolatedAsyncioTestCase):
         auth=GitHubAppAuthenticator(GitHubAppConfig("1","unused","secret"), httpx.AsyncClient(transport=httpx.MockTransport(handler)))
         with patch.object(auth, "create_app_jwt", return_value="mock-jwt"):
             self.assertEqual(await auth.get_installation_token(2), "mock-token")
+
+class ProductionCompositionTests(unittest.TestCase):
+    def test_memory_demo_composes_real_dependency_graph(self):
+        from tests.fakes import FakeAnalysisService
+        fake_factory = types.ModuleType("app.analysis.factory")
+        fake_factory.create_analysis_service = FakeAnalysisService
+        environment = {"GITHUB_APP_ID": "1", "GITHUB_PRIVATE_KEY": "unused", "GITHUB_WEBHOOK_SECRET": "secret", "ISSUEMATCH_STORAGE": "memory"}
+        with patch.dict(os.environ, environment, clear=True), patch.dict(sys.modules, {"app.analysis.factory": fake_factory}):
+            from app.main import create_production_app
+            app = create_production_app()
+        self.assertIn("/webhooks/github", [route.path for route in app.routes])
