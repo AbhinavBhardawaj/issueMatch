@@ -34,11 +34,11 @@ Ollama
         ↓
 Local Llama model
         ↓
-Raw AI JSON
+Strands/Ollama native schema-constrained output
         ↓
-Strict JSON parsing
+Validated `AnalysisProviderResult`
         ↓
-Repository evidence verification
+Exact-excerpt repository evidence verification
         ↓
 Pydantic validation
         ↓
@@ -112,11 +112,37 @@ The approach conflicts with the available repository evidence or clearly does no
 
 A `REJECT` result must contain concrete issues or a recommendation.
 
-AI output is never trusted directly. It is parsed, checked against repository evidence, and validated using the existing `ApproachAnalysis` Pydantic model.
+AI output is never trusted directly. Strands validates it against a Pydantic
+provider schema; the service then checks each citation's path and exact excerpt
+against source actually supplied to the model before creating `ApproachAnalysis`.
+This verifies that excerpts exist, not that every model interpretation is true.
+When an issue provides at least two explicit checkbox acceptance criteria, a
+bounded, negation-aware cross-check also compares each proposed action with
+those criteria and any explicit success/failure test cases in the issue body.
+A partial plan receives concrete revision feedback without a model call; an
+unrelated plan is declined. If a complete plan is contradicted only by an
+inconclusive local-model response (zero confidence, reasonless rejection, or
+unverifiable excerpts), the service may recommend it with reduced confidence
+only after independently locating relevant lines in source supplied to the
+analyzer. Invented-only file citations and absent source grounding still fail.
+This cross-check is a heuristic, not a proof that proposed code will work;
+the maintainer remains responsible for assignment.
+For the installed Strands 1.56 Ollama adapter, the direct structured-output
+method uses Ollama's JSON-schema `format` feature. Invocation-level structured
+output uses a forced tool call that Ollama cannot enforce. A schema failure
+gets one bounded retry; persistent failures mark the candidate `FAILED` and do
+not post a misleading decision. An approach that could not be evaluated gets
+a neutral "analysis temporarily unavailable" notice instead of a fabricated
+revision request; a new approach comment can trigger another attempt.
 
-A `PASS` without valid repository-grounded evidence is converted to `REVISION_REQUIRED`.
+A `PASS` without repository-grounded evidence cannot be posted as an acceptance.
 
 Unexpected fields or invalid decision-specific output are rejected.
+
+Context discovery considers paths named in the contributor approach and the
+fetched GitHub issue (including root files such as `app.py`), then narrowly
+matches issue terms to repository-tree filenames. Retrieval stays bounded to
+8 files, 12,000 characters per file, and 40,000 characters overall.
 
 ## AI Configuration
 
@@ -329,7 +355,8 @@ The test should only be considered a real AI integration test when Ollama is run
 
 If repository context collection fails, the candidate is marked as failed.
 
-If the analysis service fails, the candidate is marked as failed.
+If the analysis service fails, the candidate is marked as failed and the bot
+posts an operational notice, not an analysis decision.
 
 Empty AI responses are rejected.
 

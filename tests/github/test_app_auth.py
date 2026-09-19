@@ -29,4 +29,4 @@ class ProductionCompositionTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True), patch.dict(sys.modules, {"app.analysis.factory": fake_factory}):
             from app.main import create_production_app
             app = create_production_app()
-        self.assertIn("/webhooks/github", [route.path for route in app.routes])
+        self.assertIn("/webhooks/github", app.openapi()["paths"])

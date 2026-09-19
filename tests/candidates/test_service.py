@@ -27,6 +27,19 @@ def approach_event(delivery, username, comment="I'd like to work on this. I'll m
     current = event(delivery, comment)
     return current.model_copy(update={"comment_author": username, "comment_id": comment_id or abs(hash(delivery))})
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_issue_only_root_file_reaches_analysis_service(self):
+        class DemoClient(FakeGitHubClient):
+            async def get_issue(self, *args):
+                return {"title": "Fix Flask backend", "body": "The login error in app.py returns 200 instead of 401.", "state": "open"}
+
+        github = DemoClient(files={"README.md": "Demo", "app.py": "def login():\n    return 'error', 200"})
+        analyzer = FakeAnalysisService()
+        service = CandidateService(InMemoryCandidateRepository(), lambda _: github, analyzer)
+        comment = "I want to work on this. I'll change login failures to return 401 and add a regression test."
+        result = await service.process_issue_comment(event("issue-root", comment))
+        self.assertEqual(result.outcome, ProcessingOutcome.ANALYZED)
+        self.assertEqual([file.path for file in analyzer.calls[0][1].code_context.file_contents], ["app.py"])
+
     async def test_candidate_pipeline_and_duplicate(self):
         analyzer=FakeAnalysisService(); github=FakeGitHubClient()
         service=CandidateService(InMemoryCandidateRepository(),lambda _: github,analyzer)
@@ -40,6 +53,23 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await failing.process_issue_comment(event("fail"))).candidate.status,CandidateStatus.FAILED)
         analysis_failing=CandidateService(InMemoryCandidateRepository(),lambda _: FakeGitHubClient(),FakeAnalysisService(fail=True))
         self.assertEqual((await analysis_failing.process_issue_comment(event("analysis"))).candidate.status,CandidateStatus.FAILED)
+
+    async def test_provider_validation_failure_does_not_blame_contributor(self):
+        class InvalidProvider:
+            async def analyze(self, candidate, context):
+                raise ValueError("Model citation could not be verified")
+
+        github = FakeGitHubClient()
+        service = CandidateService(InMemoryCandidateRepository(), lambda _: github, InvalidProvider())
+        result = await service.process_issue_comment(event("invalid-provider"))
+        self.assertEqual(result.outcome, ProcessingOutcome.FAILED)
+        self.assertEqual(result.candidate.status, CandidateStatus.FAILED)
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("Analysis temporarily unavailable", github.comments[0])
+        self.assertNotIn("Status - REVISION_REQUIRED", github.comments[0])
+        self.assertEqual((await service.process_issue_comment(event("invalid-provider"))).outcome,
+                         ProcessingOutcome.DUPLICATE)
+        self.assertEqual(len(github.comments), 1)
 
     async def test_claim_only_and_ordered_candidates(self):
         repository = InMemoryCandidateRepository(); analyzer = DecisionAnalysis({"bob": AnalysisDecision.REJECT, "carol": AnalysisDecision.PASS, "dana": AnalysisDecision.PASS})

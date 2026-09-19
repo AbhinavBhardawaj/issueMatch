@@ -12,7 +12,7 @@ from app.context.issue_context import collect_issue_context
 from app.context.repository_context import collect_repository_context
 from app.github.client import GitHubClient
 from app.github.events import GitHubIssueAssignmentEvent, GitHubIssueCommentEvent
-from app.github.response import post_candidate_analysis
+from app.github.response import post_analysis_unavailable, post_candidate_analysis
 from app.models.analysis import AnalysisDecision, AnalysisService, ApproachAnalysis
 from app.models.candidate import CandidateStatus, CandidateSubmission, IssueCandidateState, IssueEvaluation
 from app.models.context import RepositoryAnalysisContext
@@ -148,19 +148,24 @@ class CandidateService:
         try:
             client = await self._make_client(installation_id)
             context = await self._collect_context(client, candidate, default_branch)
-        except Exception:
-            logger.exception("Candidate context collection failed for candidate %s", candidate.candidate_id)
+        except Exception as exc:
+            logger.error("Candidate context collection failed: candidate=%s failure_type=%s", candidate.candidate_id, type(exc).__name__)
             failed = await self._repository.update_status(candidate.candidate_id, CandidateStatus.FAILED)
-            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed, detail="context collection failed")
+            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed, detail=f"context collection failed ({type(exc).__name__})")
         if self._analysis is None:
             pending = await self._repository.update_status(candidate.candidate_id, CandidateStatus.ANALYSIS_PENDING)
             return CandidateProcessingResult(ProcessingOutcome.ANALYSIS_PENDING, candidate=pending, detail="analysis service not configured")
         try:
             analysis = ApproachAnalysis.model_validate(await self._analysis.analyze(candidate, context))
-        except Exception:
-            logger.exception("Analysis service failed for candidate %s", candidate.candidate_id)
+        except Exception as exc:
+            logger.error("Analysis service failed: candidate=%s failure_type=%s", candidate.candidate_id, type(exc).__name__)
             failed = await self._repository.update_status(candidate.candidate_id, CandidateStatus.FAILED)
-            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed, detail="analysis service failed")
+            try:
+                await post_analysis_unavailable(client, failed)
+            except Exception as posting_exc:
+                logger.error("Analysis-unavailable notice failed: candidate=%s failure_type=%s",
+                             candidate.candidate_id, type(posting_exc).__name__)
+            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed, detail=f"analysis service failed ({type(exc).__name__})")
 
         status = {
             AnalysisDecision.PASS: CandidateStatus.ACCEPTED,
@@ -219,7 +224,7 @@ class CandidateService:
     async def _collect_context(self, client: GitHubClient, candidate: CandidateSubmission, default_branch: str) -> RepositoryAnalysisContext:
         issue = await collect_issue_context(client, candidate.repository_owner, candidate.repository_name, candidate.issue_number)
         repository = await collect_repository_context(client, candidate.repository_owner, candidate.repository_name, default_branch)
-        code = await collect_code_context(client, candidate.repository_owner, candidate.repository_name, candidate.approach, repository)
+        code = await collect_code_context(client, candidate.repository_owner, candidate.repository_name, candidate.approach, repository, issue_context=issue)
         return RepositoryAnalysisContext(issue_context=issue, repository_context=repository, code_context=code)
 
     async def _make_client(self, installation_id: int | None) -> GitHubClient:

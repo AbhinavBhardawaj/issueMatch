@@ -1,3 +1,5 @@
+import logging
+
 from app.models.analysis import (
     AnalysisDecision,
     ApproachAnalysis,
@@ -5,16 +7,16 @@ from app.models.analysis import (
 from app.models.candidate import CandidateSubmission
 from app.models.context import RepositoryAnalysisContext
 
-from .provider import AnalysisProvider
-from .verifier import verify_evidence
+from .criteria import check_acceptance_criteria
+from .provider import AnalysisProvider, AnalysisProviderResult
+from .verifier import derive_issue_grounded_evidence, verify_evidence
+
+logger = logging.getLogger(__name__)
 
 
 class RuleBasedAnalysisProvider:
     """
-    Deterministic baseline provider.
-
-    This is intentionally simple. A real AI provider can later implement
-    AnalysisProvider without changing AnalysisService.
+    Legacy deterministic example, not wired into the production analysis path.
     """
 
     async def analyze(self,candidate: CandidateSubmission,
@@ -79,45 +81,105 @@ class DefaultAnalysisService:
         candidate: CandidateSubmission,
         context: RepositoryAnalysisContext,
     ) -> ApproachAnalysis:
+        coverage = check_acceptance_criteria(context.issue_context.body, candidate.approach)
+        if coverage and (coverage.missing or coverage.detail_gaps):
+            gaps = [*coverage.missing, *coverage.detail_gaps]
+            if coverage.covered:
+                analysis = ApproachAnalysis(
+                    decision=AnalysisDecision.REVISION_REQUIRED,
+                    confidence=0.5,
+                    missing_requirements=gaps,
+                    revision_feedback=(
+                    "Your plan addresses part of the issue, but please also cover: "
+                    + "; ".join(gaps[:3])
+                    ),
+                )
+            else:
+                analysis = ApproachAnalysis(
+                    decision=AnalysisDecision.REJECT,
+                    confidence=0.5,
+                    issues=["The proposed work does not address the issue's acceptance criteria."],
+                    recommendation="This approach is not recommended for this issue.",
+                )
+            logger.info("Checklist cross-check: candidate=%s covered=%s total=%s decision=%s",
+                        candidate.candidate_id, len(coverage.covered), len(coverage.criteria), analysis.decision)
+            return analysis
 
         prompt = self._build_prompt(candidate, context)
+        provider_result = AnalysisProviderResult.model_validate(await self._provider.generate(prompt))
+        verified_evidence = verify_evidence(provider_result.evidence, context)
+        supplied_paths = {file.path for file in (*context.code_context.file_contents,
+                                                 *context.code_context.test_files)}
+        absent_citations = [item.path for item in provider_result.evidence if item.path not in supplied_paths]
+        result = provider_result.model_dump()
 
-        raw_response = await self._provider.generate(prompt)
-
-        if not isinstance(raw_response, str):
-            raise ValueError("Analysis provider must return a string")
-
-        import json
-
-        try:
-            raw_result = json.loads(raw_response)
-        except json.JSONDecodeError as exc:
-            raise ValueError("Analysis provider returned invalid JSON") from exc
-
-        if not isinstance(raw_result, dict):
-            raise ValueError("Analysis provider JSON must be an object")
-
-        evidence = raw_result.get("evidence", [])
-
-        if not isinstance(evidence, list):
-            raise ValueError("Analysis provider returned invalid evidence")
-
-        verified_evidence = verify_evidence(evidence, context)
-
-        decision = raw_result.get("decision")
-
-        if decision == AnalysisDecision.PASS.value and not verified_evidence:
-            decision = AnalysisDecision.REVISION_REQUIRED.value
-            raw_result["revision_feedback"] = (
-                "The proposed approach did not contain repository-grounded evidence. "
-                "Please identify relevant existing files or components."
-            )
-
-        result = {
-            **raw_result,
-            "decision": decision,
-            "evidence": verified_evidence,
+        repo_identifiers = {
+            context.repository_context.name,
+            f"{context.repository_context.owner}/{context.repository_context.name}",
         }
+        invented_citations = [path for path in absent_citations if path not in repo_identifiers]
+
+        # A tiny local model can contradict a complete, explicitly checked
+        # proposal with zero confidence, a reasonless rejection, or a bogus
+        # excerpt from a real file. In that narrow case independently ground
+        # the checklist in real source locations. Never accept invented paths.
+        invalid_rejection = (provider_result.decision is AnalysisDecision.REJECT
+                             and not provider_result.issues and not provider_result.recommendation)
+        inconclusive_zero = (provider_result.confidence == 0 and (
+            provider_result.decision is AnalysisDecision.PASS or
+            (provider_result.decision is AnalysisDecision.REVISION_REQUIRED
+             and not provider_result.issues and not provider_result.missing_requirements)
+        ))
+        invalid_pass_citation = (provider_result.decision is AnalysisDecision.PASS
+                                 and (bool(absent_citations)
+                                      or (bool(provider_result.evidence) and not verified_evidence)))
+        if (coverage and not coverage.missing
+                and (inconclusive_zero or invalid_rejection or invalid_pass_citation)):
+            if provider_result.evidence and (absent_citations or not verified_evidence):
+                if invented_citations and not any(item.path in supplied_paths for item in provider_result.evidence):
+                    raise ValueError("Provider cited a repository file absent from supplied context")
+                logger.warning("Discarding unverified inconclusive citations: candidate=%s",
+                               candidate.candidate_id)
+            grounded = derive_issue_grounded_evidence(candidate, context) or verified_evidence
+            if not grounded:
+                raise ValueError("Complete checklist lacked relevant repository grounding")
+            logger.info("Resolved inconclusive checklist contradiction: candidate=%s criteria=%s",
+                        candidate.candidate_id, len(coverage.criteria))
+            result.update(
+                decision=AnalysisDecision.PASS,
+                confidence=0.5,
+                evidence=grounded,
+                issues=[],
+                missing_requirements=[],
+                revision_feedback="",
+                recommendation="The approach covers the issue's explicit acceptance criteria; the maintainer decides assignment.",
+            )
+            return ApproachAnalysis.model_validate(result)
+
+        if provider_result.decision is AnalysisDecision.PASS:
+            if absent_citations:
+                if invented_citations:
+                    raise ValueError("Provider PASS cited a repository file absent from supplied context")
+                if not verified_evidence:
+                    verified_evidence = derive_issue_grounded_evidence(candidate, context)
+            if provider_result.confidence <= 0:
+                raise ValueError("Provider PASS had zero confidence")
+            if provider_result.evidence and not verified_evidence:
+                if invented_citations or not any(item.path in repo_identifiers for item in provider_result.evidence):
+                    raise ValueError("Provider PASS cited no verifiable repository source")
+                verified_evidence = derive_issue_grounded_evidence(candidate, context)
+            if not provider_result.evidence:
+                verified_evidence = derive_issue_grounded_evidence(candidate, context)
+                logger.info("Grounded uncited PASS using repository lines: candidate=%s locations=%s",
+                            candidate.candidate_id, len(verified_evidence))
+            if not verified_evidence:
+                raise ValueError("Provider PASS lacked relevant repository grounding")
+        result["evidence"] = verified_evidence
+
+        if provider_result.decision is AnalysisDecision.REVISION_REQUIRED and not provider_result.revision_feedback:
+            details = provider_result.issues + provider_result.missing_requirements
+            if details:
+                result["revision_feedback"] = " ".join(details[:3])
 
         return ApproachAnalysis.model_validate(result)
 
@@ -134,13 +196,13 @@ class DefaultAnalysisService:
         ) or "- None"
 
         file_contents = "\n\n".join(
-            f"FILE: {file.path}\n"
+            f"FILE: {file.path} (truncated: {file.truncated})\n"
             f"CONTENT:\n{file.content}"
             for file in code_context.file_contents
         ) or "None"
 
         test_files = "\n\n".join(
-            f"TEST FILE: {file.path}\n"
+            f"TEST FILE: {file.path} (truncated: {file.truncated})\n"
             f"CONTENT:\n{file.content}"
             for file in code_context.test_files
         ) or "None"
@@ -176,10 +238,10 @@ class DefaultAnalysisService:
     {candidate.issue_number}
 
     Title:
-    {candidate.issue_title}
+    {context.issue_context.title}
 
     Body:
-    {candidate.issue_body}
+    {context.issue_context.body}
 
 
     ====================
@@ -253,44 +315,16 @@ class DefaultAnalysisService:
     For REJECT, explain the concrete repository mismatch.
 
     ====================
-    REQUIRED JSON OUTPUT
+    STRUCTURED OUTPUT
     ====================
 
-    Return exactly ONE JSON object with these exact top-level keys:
-
-    {{
-      "decision": "PASS",
-      "confidence": 0.0,
-      "strengths": [],
-      "issues": [],
-      "missing_requirements": [],
-      "evidence": [],
-      "revision_feedback": "",
-      "recommendation": ""
-    }}
-
-    IMPORTANT:
-    - The key MUST be named "decision", never "approach", "selected", or anything else.
-    - "decision" MUST be exactly one of:
-      "PASS", "REVISION_REQUIRED", "REJECT"
-    - "confidence" MUST be a number between 0 and 1.
-    - "strengths" MUST be a JSON array of strings.
-    - "issues" MUST be a JSON array of strings.
-    - "missing_requirements" MUST be a JSON array of strings.
-    - "evidence" MUST be a JSON array of strings.
-    - "revision_feedback" MUST be a string.
-    - "recommendation" MUST be a string.
-    - Do not create any additional top-level keys.
-    - Do not nest the result inside another object.
-    - Do not return an "approach" object.
-    - Do not use "selected" instead of "decision".
-
-    Decision-specific requirements:
-    - PASS MUST contain repository-grounded evidence.
-    - REVISION_REQUIRED MUST contain revision_feedback.
-    - REJECT MUST contain concrete issues or a recommendation.
-
-    Return ONLY the JSON object.
-    Do not add markdown fences.
-    Do not add explanations before or after the JSON.
+    The response is constrained by the AnalysisProviderResult schema.
+    Confidence is a decimal from 0.0 to 1.0, not a percentage.
+    Each evidence item requires path, claim, and a short exact excerpt copied
+    from the supplied source or test content. In each evidence item, path must
+    be the exact relative file path from supplied files (e.g., "app.py"), NOT
+    the repository name. Never cite a tree-only path or content outside the
+    supplied excerpt. PASS requires such evidence and positive confidence.
+    REVISION_REQUIRED needs actionable revision_feedback.
+    REJECT needs concrete issues or a recommendation.
     """

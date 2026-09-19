@@ -27,3 +27,18 @@ def render_candidate_analysis(candidate: CandidateSubmission, analysis: Approach
 
 async def post_candidate_analysis(client: GitHubClient, candidate: CandidateSubmission, analysis: ApproachAnalysis) -> dict:
     return await client.create_issue_comment(candidate.repository_owner, candidate.repository_name, candidate.issue_number, render_candidate_analysis(candidate, analysis))
+
+
+async def post_analysis_unavailable(client: GitHubClient, candidate: CandidateSubmission) -> dict:
+    """Acknowledge an approach without inventing an analysis decision."""
+    username = re.sub(r"[^A-Za-z0-9-]", "", candidate.contributor_username) or "contributor"
+    body = (
+        f"Candidate: @{username}\n\n"
+        "Analysis temporarily unavailable. Your approach was received, but the bot could not "
+        "complete a reliable evaluation. No ACCEPTED, REVISION_REQUIRED, or DECLINED decision "
+        "has been made. Please do not revise your proposal based only on this notice.\n\n"
+        "Maintainer: once the analysis service is available, ask for a new approach comment "
+        "to trigger evaluation."
+    )
+    return await client.create_issue_comment(candidate.repository_owner, candidate.repository_name,
+                                             candidate.issue_number, body)

@@ -1,29 +1,43 @@
-"""Targeted, size-bounded source retrieval from a contributor's stated approach."""
+"""Targeted, size-bounded source retrieval from approach and issue context."""
 import re
 from app.github.client import GitHubClient, GitHubNotFoundError
-from app.models.context import CodeContext, CodeFile, RepositoryContext
+from app.models.context import CodeContext, CodeFile, IssueContext, RepositoryContext
 
 MAX_FILES = 8
 MAX_FILE_CHARS = 12_000
 MAX_TOTAL_CHARS = 40_000
-_PATH = re.compile(r"(?<![\w.-])([\w.-]+(?:/[\w.-]+)+\.(?:py|js|jsx|ts|tsx|go|rs|java|rb|php|cs|cpp|c|h|md|yml|yaml|json))(?![\w.-])")
+_PATH = re.compile(
+    r"(?<![\w./-])((?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*"
+    r"\.(?:py|js|jsx|ts|tsx|go|rs|java|rb|php|cs|cpp|c|h|md|yml|yaml|json)"
+    r"|(?:[A-Za-z0-9_-]+/)*Dockerfile)(?![\w./-])"
+)
 
 
 def extract_mentioned_paths(approach: str) -> list[str]:
     """Extract plausible relative file paths, rejecting traversal and duplicates."""
     result: list[str] = []
     for match in _PATH.finditer(approach or ""):
-        path = match.group(1).strip(".,:;`'\"")
-        if path.startswith("/") or ".." in path.split("/") or path not in result:
-            if not path.startswith("/") and ".." not in path.split("/"):
-                result.append(path)
+        path = match.group(1)
+        if path not in result:
+            result.append(path)
     return result
 
 
-async def collect_code_context(client: GitHubClient, owner: str, repository: str, approach: str, repo_context: RepositoryContext) -> CodeContext:
-    """Fetch only validated proposed files and likely paired test files, within strict caps."""
+async def collect_code_context(client: GitHubClient, owner: str, repository: str, approach: str,
+                               repo_context: RepositoryContext, issue_context: IssueContext | None = None) -> CodeContext:
+    """Prioritize approach paths, issue paths, then narrow tree matches, within strict caps."""
     available = set(repo_context.tree_paths)
-    mentioned = extract_mentioned_paths(approach)
+    issue_text = f"{issue_context.title} {issue_context.body}" if issue_context else ""
+    mentioned = list(dict.fromkeys(extract_mentioned_paths(approach) + extract_mentioned_paths(issue_text)))
+    if not any(path in available for path in mentioned) and issue_text:
+        # A narrow fallback for issues naming a component without its extension.
+        words = set(re.findall(r"[a-z0-9_]+", issue_text.lower()))
+        for path in repo_context.tree_paths:
+            stem = path.rsplit("/", 1)[-1].split(".", 1)[0].lower()
+            if stem in words and stem not in {"test", "tests", "readme", "index"}:
+                mentioned.append(path)
+                if len(mentioned) >= MAX_FILES:
+                    break
     existing = [path for path in mentioned if path in available][:MAX_FILES]
     missing = [path for path in mentioned if path not in available]
     # A matching test path is useful context, but never fetch more than the global cap.
