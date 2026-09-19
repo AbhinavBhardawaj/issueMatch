@@ -51,7 +51,41 @@ def create_github_webhook_router(
         if event_name == "ping":
             return {"status": "pong"}
 
-        # Local delivery idempotency claim over exact raw body hash
+        # 1. Parse JSON payload (must not claim delivery if JSON is malformed)
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Malformed JSON payload")
+
+        # 2. Normalize event envelope (must not claim delivery if event structure is malformed)
+        push_event = None
+        comment_event = None
+
+        if event_name == "push":
+            try:
+                push_event = normalize_push_event(payload, delivery_id)
+            except MalformedGitHubEvent as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
+            if push_event is None:
+                # Deleted branch, non-default branch, or all-zero after SHA
+                return {"status": "ignored"}
+
+        elif event_name == "issue_comment":
+            if payload.get("action") != "created":
+                return {"status": "ignored"}
+            try:
+                comment_event = normalize_issue_comment_created(payload, delivery_id)
+            except MalformedGitHubEvent:
+                raise HTTPException(status_code=400, detail="Malformed issue comment event")
+
+        elif event_name in ("issues", "installation"):
+            return {"status": "ignored"}
+
+        else:
+            return {"status": "ignored"}
+
+        # 3. Local delivery idempotency claim over exact raw body hash
         body_hash = hashlib.sha256(raw_body).hexdigest()
         if delivery_store:
             claim_result = await delivery_store.claim(delivery_id, body_hash)
@@ -63,58 +97,49 @@ def create_github_webhook_router(
                     detail="Delivery ID payload mismatch: delivery already claimed with different content",
                 )
 
-        # Parse JSON payload
-        try:
-            payload = json.loads(raw_body)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Malformed JSON payload")
-
-        # PUSH EVENT
-        if event_name == "push":
-            try:
-                push_event = normalize_push_event(payload, delivery_id)
-            except MalformedGitHubEvent as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-
-            if push_event is None:
-                # Deleted branch, non-default branch, or all-zero after SHA
-                return {"status": "ignored"}
-
+        # 4. Dispatch processing and manage delivery lifecycle
+        if push_event:
             active_scout_service = scout_service
             if active_scout_service is None and hasattr(request.app.state, "scout_service"):
                 active_scout_service = getattr(request.app.state, "scout_service", None)
 
             if active_scout_service:
-                # Local orchestration via BackgroundTasks (documented as temporary local orchestration)
-                background_tasks.add_task(active_scout_service.process_push, push_event)
+                async def _process_push_wrapped():
+                    try:
+                        res = await active_scout_service.process_push(push_event)
+                        if res and getattr(res, "failures", None):
+                            if delivery_store:
+                                await delivery_store.fail(delivery_id, body_hash)
+                        else:
+                            if delivery_store:
+                                await delivery_store.complete(delivery_id, body_hash)
+                    except Exception:
+                        if delivery_store:
+                            await delivery_store.fail(delivery_id, body_hash)
+                        raise
+
+                background_tasks.add_task(_process_push_wrapped)
 
             return {"status": "accepted"}
 
-        # ISSUE COMMENT EVENT
-        elif event_name == "issue_comment":
-            if payload.get("action") != "created":
-                return {"status": "ignored"}
-            try:
-                normalized = normalize_issue_comment_created(payload, delivery_id)
-            except MalformedGitHubEvent:
-                raise HTTPException(status_code=400, detail="Malformed issue comment event")
+        elif comment_event:
             active_candidate_service = candidate_service
             if active_candidate_service is None and hasattr(request.app.state, "candidate_service"):
                 active_candidate_service = getattr(request.app.state, "candidate_service", None)
+
             if active_candidate_service:
-                background_tasks.add_task(active_candidate_service.process_issue_comment, normalized)
+                async def _process_comment_wrapped():
+                    try:
+                        await active_candidate_service.process_issue_comment(comment_event)
+                        if delivery_store:
+                            await delivery_store.complete(delivery_id, body_hash)
+                    except Exception:
+                        if delivery_store:
+                            await delivery_store.fail(delivery_id, body_hash)
+                        raise
+
+                background_tasks.add_task(_process_comment_wrapped)
+
             return {"status": "accepted"}
-
-        # ISSUES EVENT
-        elif event_name == "issues":
-            return {"status": "ignored"}
-
-        # INSTALLATION EVENT
-        elif event_name == "installation":
-            return {"status": "ignored"}
-
-        else:
-            # Unsupported events return documented 400 with zero processing
-            return {"status": "ignored"}
 
     return router

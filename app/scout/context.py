@@ -89,6 +89,20 @@ def _extract_imports(file_path: str, content: str) -> Set[str]:
     return related
 
 
+def truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, bool]:
+    """
+    Safely truncate a string to at most max_bytes when encoded in UTF-8.
+    Never produces invalid UTF-8 and never splits multi-byte code points.
+    Returns (truncated_text, was_truncated).
+    """
+    raw_bytes = text.encode("utf-8")
+    if len(raw_bytes) <= max_bytes:
+        return text, False
+    truncated_bytes = raw_bytes[:max_bytes]
+    truncated_text = truncated_bytes.decode("utf-8", errors="ignore")
+    return truncated_text, True
+
+
 class ScoutContextBuilder:
     def __init__(self, client: ScoutGitHubReadClient) -> None:
         self.client = client
@@ -112,6 +126,10 @@ class ScoutContextBuilder:
             completeness = ContextCompleteness.PARTIAL
             partial_reasons.append("FORCED_PUSH_FALLBACK")
 
+        if len(changed_files) > MAX_CHANGED_FILES:
+            completeness = ContextCompleteness.PARTIAL
+            partial_reasons.append("CHANGED_FILE_LIMIT_REACHED")
+
         total_bytes = 0
         collected_files: list[ScoutFile] = []
         collected_test_files: list[ScoutFile] = []
@@ -125,6 +143,12 @@ class ScoutContextBuilder:
             if cf.path.lower() == "readme.md":
                 continue
 
+            is_test = _is_test_file(cf.path)
+            if is_test and len(collected_test_files) >= MAX_TEST_FILES:
+                completeness = ContextCompleteness.PARTIAL
+                partial_reasons.append("TEST_FILE_LIMIT_REACHED")
+                continue
+
             try:
                 raw_content = await self.client.get_file_content(
                     event.repository_owner,
@@ -132,32 +156,29 @@ class ScoutContextBuilder:
                     cf.path,
                     ref=event.after_sha,
                 )
-                size_bytes = len(raw_content.encode("utf-8"))
-                truncated = False
-
-                if size_bytes > MAX_FILE_BYTES:
-                    raw_content = raw_content[:MAX_FILE_BYTES]
-                    truncated = True
+                safe_content, truncated = truncate_utf8_bytes(raw_content, MAX_FILE_BYTES)
+                if truncated:
                     completeness = ContextCompleteness.PARTIAL
                     partial_reasons.append("FILE_TRUNCATED")
 
-                if total_bytes + len(raw_content.encode("utf-8")) > MAX_TOTAL_CONTEXT_BYTES:
+                content_bytes = len(safe_content.encode("utf-8"))
+                if total_bytes + content_bytes > MAX_TOTAL_CONTEXT_BYTES:
                     completeness = ContextCompleteness.PARTIAL
                     partial_reasons.append("CONTEXT_BUDGET_REACHED")
                     break
 
                 scout_file = ScoutFile(
                     path=cf.path,
-                    content=raw_content,
+                    content=safe_content,
                     changed=True,
                     patch=cf.patch,
                     truncated=truncated,
-                    size_bytes=len(raw_content.encode("utf-8")),
+                    size_bytes=content_bytes,
                 )
                 total_bytes += scout_file.size_bytes
                 seen_paths.add(cf.path)
 
-                if _is_test_file(cf.path):
+                if is_test:
                     collected_test_files.append(scout_file)
                 else:
                     collected_files.append(scout_file)
@@ -192,12 +213,16 @@ class ScoutContextBuilder:
             is_test = _is_test_file(path)
 
             if matches_import or is_test:
-                if is_test and len(collected_test_files) >= MAX_TEST_FILES:
-                    continue
-                if not is_test and related_count >= MAX_RELATED_FILES:
-                    completeness = ContextCompleteness.PARTIAL
-                    partial_reasons.append("RELATED_FILE_LIMIT_REACHED")
-                    continue
+                if is_test:
+                    if len(collected_test_files) >= MAX_TEST_FILES:
+                        completeness = ContextCompleteness.PARTIAL
+                        partial_reasons.append("TEST_FILE_LIMIT_REACHED")
+                        continue
+                else:
+                    if related_count >= MAX_RELATED_FILES:
+                        completeness = ContextCompleteness.PARTIAL
+                        partial_reasons.append("RELATED_FILE_LIMIT_REACHED")
+                        continue
 
                 try:
                     raw_content = await self.client.get_file_content(
@@ -206,27 +231,24 @@ class ScoutContextBuilder:
                         path,
                         ref=event.after_sha,
                     )
-                    size_bytes = len(raw_content.encode("utf-8"))
-                    truncated = False
-
-                    if size_bytes > MAX_FILE_BYTES:
-                        raw_content = raw_content[:MAX_FILE_BYTES]
-                        truncated = True
+                    safe_content, truncated = truncate_utf8_bytes(raw_content, MAX_FILE_BYTES)
+                    if truncated:
                         completeness = ContextCompleteness.PARTIAL
                         partial_reasons.append("FILE_TRUNCATED")
 
-                    if total_bytes + len(raw_content.encode("utf-8")) > MAX_TOTAL_CONTEXT_BYTES:
+                    content_bytes = len(safe_content.encode("utf-8"))
+                    if total_bytes + content_bytes > MAX_TOTAL_CONTEXT_BYTES:
                         completeness = ContextCompleteness.PARTIAL
                         partial_reasons.append("CONTEXT_BUDGET_REACHED")
                         break
 
                     scout_file = ScoutFile(
                         path=path,
-                        content=raw_content,
+                        content=safe_content,
                         changed=False,
                         patch=None,
                         truncated=truncated,
-                        size_bytes=len(raw_content.encode("utf-8")),
+                        size_bytes=content_bytes,
                     )
                     total_bytes += scout_file.size_bytes
                     seen_paths.add(path)
@@ -243,14 +265,17 @@ class ScoutContextBuilder:
         # 3. Collect README
         readme_content = ""
         try:
-            readme_content = await self.client.get_file_content(
+            raw_readme = await self.client.get_file_content(
                 event.repository_owner,
                 event.repository_name,
                 "README.md",
                 ref=event.after_sha,
             )
-            if len(readme_content.encode("utf-8")) > MAX_FILE_BYTES:
-                readme_content = readme_content[:MAX_FILE_BYTES]
+            readme_content, readme_truncated = truncate_utf8_bytes(raw_readme, MAX_FILE_BYTES)
+            if readme_truncated:
+                completeness = ContextCompleteness.PARTIAL
+                partial_reasons.append("README_TRUNCATED")
+            total_bytes += len(readme_content.encode("utf-8"))
         except Exception:
             readme_content = ""
 
@@ -264,12 +289,13 @@ class ScoutContextBuilder:
                 per_page=MAX_EXISTING_ISSUES,
             )
             for issue in raw_issues:
+                body_summary, _ = truncate_utf8_bytes(issue.get("body") or "", 200)
                 existing_issues.append(
                     ScoutExistingIssue(
                         number=issue.get("number", 0),
                         title=issue.get("title", ""),
                         state=issue.get("state", "open"),
-                        body_summary=(issue.get("body") or "")[:200],
+                        body_summary=body_summary,
                     )
                 )
         except Exception:

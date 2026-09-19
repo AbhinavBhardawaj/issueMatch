@@ -35,9 +35,7 @@ class ScoutExistingIssue(BaseModel):
     body_summary: str = ""
 
 
-class ContextCompleteness(str, Enum):
-    COMPLETE = "COMPLETE"
-    PARTIAL = "PARTIAL"
+from app.domain.models import ContextCompleteness
 
 
 class ScoutContext(BaseModel):

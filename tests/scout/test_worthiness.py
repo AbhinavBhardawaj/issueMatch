@@ -69,6 +69,42 @@ def test_partial_context_global_absence_suppression():
     assert reason == SuppressionReason.PARTIAL_CONTEXT_GLOBAL_ABSENCE
 
 
+def test_partial_context_repo_wide_claim_rejected_even_if_not_absence():
+    """When context is PARTIAL, repository-wide claims cannot be authorized."""
+    ctx = make_context_with_auth_file(completeness=ContextCompleteness.PARTIAL)
+    data = make_valid_draft_dict()
+    data["claim_scope"] = "repository_wide"
+    data["depends_on_absence"] = False
+    draft = ScoutFindingDraft(**data)
+    escalate, reason = should_escalate_to_verifier(draft, ctx)
+    assert escalate is False
+    assert reason == SuppressionReason.PARTIAL_CONTEXT_GLOBAL_ABSENCE
+
+
+def test_partial_context_absence_dependent_claim_rejected():
+    """When context is PARTIAL, absence-dependent claims cannot be authorized."""
+    ctx = make_context_with_auth_file(completeness=ContextCompleteness.PARTIAL)
+    data = make_valid_draft_dict()
+    data["claim_scope"] = "local"
+    data["depends_on_absence"] = True
+    draft = ScoutFindingDraft(**data)
+    escalate, reason = should_escalate_to_verifier(draft, ctx)
+    assert escalate is False
+    assert reason == SuppressionReason.PARTIAL_CONTEXT_GLOBAL_ABSENCE
+
+
+def test_partial_context_local_evidenced_finding_remains_eligible():
+    """When context is PARTIAL, a local fully-evidenced finding not depending on absence remains eligible."""
+    ctx = make_context_with_auth_file(completeness=ContextCompleteness.PARTIAL)
+    data = make_valid_draft_dict()
+    data["claim_scope"] = "local"
+    data["depends_on_absence"] = False
+    draft = ScoutFindingDraft(**data)
+    escalate, reason = should_escalate_to_verifier(draft, ctx)
+    assert escalate is True
+    assert reason is None
+
+
 def test_real_behavioral_defect_escalates():
     ctx = make_context_with_auth_file()
     draft = ScoutFindingDraft(**make_valid_draft_dict())

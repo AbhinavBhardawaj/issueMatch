@@ -10,7 +10,12 @@ from app.services.issue_gate import InMemoryDedupStore
 from app.services.pipeline import VerifierPipeline
 from app.scout.agent import ScoutAgent
 from app.scout.service import ScoutService
-from app.infrastructure.llm_router import MultiLLMProvider, load_providers
+from app.infrastructure.llm_router import (
+    MultiLLMProvider,
+    load_providers,
+    create_scout_provider,
+    create_verifier_provider,
+)
 from app.github.app_auth import GitHubAppAuthenticator, GitHubAppConfig
 from app.api.verify import router as verify_router
 from app.api.scout import router as scout_router
@@ -47,16 +52,20 @@ def get_application_scout_service(dedup_store: InMemoryDedupStore | None = None)
     global _scout_service
     if _scout_service is None:
         try:
-            providers = load_providers()
+            scout_llm = create_scout_provider()
         except Exception:
-            providers = []
-        multi_llm = MultiLLMProvider(providers)
-        scout_agent = ScoutAgent(llm_provider=multi_llm)
+            scout_llm = MultiLLMProvider([])
 
+        try:
+            verifier_llm = create_verifier_provider()
+        except Exception:
+            verifier_llm = MultiLLMProvider([])
+
+        scout_agent = ScoutAgent(llm_provider=scout_llm)
         client_factory = get_lazy_installation_client_factory()
 
         verifier_pipeline = VerifierPipeline(
-            llm_provider=multi_llm,
+            llm_provider=verifier_llm,
             dedup_store=dedup_store or _dedup_store,
         )
 

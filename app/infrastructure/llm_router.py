@@ -20,16 +20,18 @@ from app.verifier.agent import LLMProvider
 from app.verifier.schemas import LLMInvocationError
 
 class GroqProvider:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
+        self.model = model or "qwen/qwen3.8-27b"
+        self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
-                    "model": "qwen/qwen3.8-27b",
+                    "model": self.model,
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user}
@@ -42,13 +44,16 @@ class GroqProvider:
             return data["choices"][0]["message"]["content"]
 
 class GeminiProvider:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
+        self.model = model or "gemini-1.5-flash"
+        self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
-                "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+                url,
                 headers={"x-goog-api-key": self.api_key},
                 json={
                     "systemInstruction": {"parts": [{"text": system}]},
@@ -60,16 +65,18 @@ class GeminiProvider:
             return data["candidates"][0]["content"]["parts"][0]["text"]
 
 class MistralProvider:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
+        self.model = model or "mistral-large-latest"
+        self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
                 "https://api.mistral.ai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
-                    "model": "mistral-large-latest",
+                    "model": self.model,
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user}
@@ -81,16 +88,18 @@ class MistralProvider:
             return data["choices"][0]["message"]["content"]
 
 class CohereProvider:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
+        self.model = model or "command-r-plus"
+        self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
                 "https://api.cohere.ai/v2/chat",
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json={
-                    "model": "command-r-plus",
+                    "model": self.model,
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user}
@@ -102,12 +111,13 @@ class CohereProvider:
             return data["message"]["content"][0]["text"]
 
 class NvidiaNimProvider:
-    def __init__(self, api_key: str, model: str | None = None):
+    def __init__(self, api_key: str, model: str | None = None, timeout: float = 20.0):
         self.api_key = api_key
         self.model = model or os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+        self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
                 "https://integrate.api.nvidia.com/v1/chat/completions",
                 headers={
@@ -126,6 +136,88 @@ class NvidiaNimProvider:
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
+
+
+PROVIDER_CLASSES = {
+    "GROQ": GroqProvider,
+    "GEMINI": GeminiProvider,
+    "MISTRAL": MistralProvider,
+    "COHERE": CohereProvider,
+    "NVIDIA": NvidiaNimProvider,
+    "NVIDIA_NIM": NvidiaNimProvider,
+}
+
+
+def get_provider_key(provider_name: str, role: str) -> str:
+    role_upper = role.upper()
+    role_key = os.environ.get(f"{role_upper}_API_KEY", "").strip()
+    if role_key:
+        return role_key
+
+    norm_name = provider_name.upper().replace("-", "_")
+    key_envs = {
+        "GROQ": ["GROQ_API_KEYS", "GROQ_API_KEY"],
+        "GEMINI": ["GEMINI_API_KEYS", "GEMINI_API_KEY"],
+        "MISTRAL": ["MISTRAL_API_KEYS", "MISTRAL_API_KEY"],
+        "COHERE": ["COHERE_API_KEYS", "COHERE_API_KEY"],
+        "NVIDIA": ["NVIDIA_API_KEYS", "NVIDIA_API_KEY"],
+        "NVIDIA_NIM": ["NVIDIA_API_KEYS", "NVIDIA_API_KEY"],
+    }.get(norm_name, [])
+
+    for env_var in key_envs:
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            first_key = val.split(",")[0].strip()
+            if first_key:
+                return first_key
+
+    return "mock-key"
+
+
+def create_role_provider(
+    role: str,
+    provider_name: str | None = None,
+    model_id: str | None = None,
+    timeout: float | None = None,
+) -> LLMProvider:
+    role_upper = role.upper()
+    resolved_provider = provider_name or os.environ.get(f"{role_upper}_PROVIDER")
+    resolved_model = model_id or os.environ.get(f"{role_upper}_MODEL_ID")
+
+    role_timeout_env = os.environ.get(f"{role_upper}_TIMEOUT")
+    role_timeout = timeout if timeout is not None else (float(role_timeout_env) if role_timeout_env else None)
+
+    if resolved_provider:
+        prov_key = resolved_provider.upper().replace("-", "_")
+        cls = PROVIDER_CLASSES.get(prov_key)
+        if not cls:
+            raise ValueError(f"Unknown provider '{resolved_provider}' for role '{role}'")
+        api_key = get_provider_key(resolved_provider, role)
+        kwargs = {"api_key": api_key, "model": resolved_model}
+        if role_timeout is not None:
+            kwargs["timeout"] = role_timeout
+        return cls(**kwargs)
+
+    # Fallback to loading providers independently for this role (never share instances)
+    providers = load_providers()
+    return MultiLLMProvider(providers)
+
+
+def create_scout_provider(
+    provider_name: str | None = None,
+    model_id: str | None = None,
+    timeout: float | None = None,
+) -> LLMProvider:
+    return create_role_provider("scout", provider_name, model_id, timeout)
+
+
+def create_verifier_provider(
+    provider_name: str | None = None,
+    model_id: str | None = None,
+    timeout: float | None = None,
+) -> LLMProvider:
+    return create_role_provider("verifier", provider_name, model_id, timeout)
+
 
 def load_providers() -> List[LLMProvider]:
     providers: List[LLMProvider] = []

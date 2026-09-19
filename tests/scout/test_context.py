@@ -106,3 +106,83 @@ def test_import_extraction_python():
     imports = _extract_imports("app/main.py", code)
     assert "pipeline.py" in imports
     assert "models.py" in imports
+
+
+# ===========================================================================
+# PHASE 3: CONTEXT BOUNDS & COMPLETENESS REGRESSION TESTS
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_changed_files_exceeding_max_marks_partial():
+    """When changed files exceed MAX_CHANGED_FILES, context must be marked PARTIAL with CHANGED_FILE_LIMIT_REACHED."""
+    client = FakeScoutReadClient()
+    # Add 100 files to client
+    for i in range(100):
+        client.files[f"app/module_{i}.py"] = f"x = {i}\n"
+
+    builder = ScoutContextBuilder(client)
+    event = make_test_event()
+    changed = [ChangedFile(path=f"app/module_{i}.py", status="modified") for i in range(100)]
+
+    ctx = await builder.build_context(event, changed)
+    assert len(ctx.files) <= 25
+    assert ctx.context_completeness == ContextCompleteness.PARTIAL
+    assert "CHANGED_FILE_LIMIT_REACHED" in ctx.partial_reasons
+
+
+@pytest.mark.asyncio
+async def test_test_files_exceeding_max_marks_partial():
+    """All test files (changed or discovered) must respect MAX_TEST_FILES and mark PARTIAL."""
+    client = FakeScoutReadClient()
+    for i in range(15):
+        client.files[f"tests/test_{i}.py"] = f"def test_{i}(): pass\n"
+
+    builder = ScoutContextBuilder(client)
+    event = make_test_event()
+    # 15 changed test files (exceeding MAX_TEST_FILES = 10)
+    changed = [ChangedFile(path=f"tests/test_{i}.py", status="modified") for i in range(15)]
+
+    ctx = await builder.build_context(event, changed)
+    assert len(ctx.test_files) <= 10
+    assert ctx.context_completeness == ContextCompleteness.PARTIAL
+    assert "TEST_FILE_LIMIT_REACHED" in ctx.partial_reasons
+
+
+@pytest.mark.asyncio
+async def test_safe_utf8_byte_truncation_multibyte_characters():
+    """Safe UTF-8 byte truncation must not split multibyte code points and must never exceed byte budget."""
+    client = FakeScoutReadClient()
+    # 4-byte emoji repeated 6000 times = 24,000 bytes > MAX_FILE_BYTES (20,000)
+    multibyte_content = "🚀" * 6000
+    client.files["app/unicode.py"] = multibyte_content
+
+    builder = ScoutContextBuilder(client)
+    event = make_test_event()
+    changed = [ChangedFile(path="app/unicode.py", status="modified")]
+
+    ctx = await builder.build_context(event, changed)
+    unicode_file = next(f for f in ctx.files if f.path == "app/unicode.py")
+    assert unicode_file.truncated is True
+    assert len(unicode_file.content.encode("utf-8")) <= 20_000
+    # Must be valid UTF-8 without replacement char '\ufffd'
+    assert "\ufffd" not in unicode_file.content
+    assert ctx.context_completeness == ContextCompleteness.PARTIAL
+    assert "FILE_TRUNCATED" in ctx.partial_reasons
+
+
+@pytest.mark.asyncio
+async def test_readme_truncation_in_bytes_marks_partial():
+    """README exceeding MAX_FILE_BYTES in UTF-8 bytes must be truncated safely and mark PARTIAL."""
+    client = FakeScoutReadClient()
+    # 3-byte Japanese kanji repeated 8000 times = 24,000 bytes > 20,000
+    client.files["README.md"] = "日本語" * 8000
+
+    builder = ScoutContextBuilder(client)
+    event = make_test_event()
+    changed = [ChangedFile(path="app/main.py", status="modified")]
+
+    ctx = await builder.build_context(event, changed)
+    assert len(ctx.readme.encode("utf-8")) <= 20_000
+    assert "\ufffd" not in ctx.readme
+    assert ctx.context_completeness == ContextCompleteness.PARTIAL
+    assert "README_TRUNCATED" in ctx.partial_reasons

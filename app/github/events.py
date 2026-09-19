@@ -61,11 +61,10 @@ def normalize_push_event(payload: dict[str, Any], delivery_id: str) -> GitHubPus
     if not isinstance(payload, dict):
         raise MalformedGitHubEvent("Payload must be a dictionary")
 
-    # Safely ignore events lacking push identification
-    if not payload.get("ref") or not payload.get("after"):
-        return None
-
     try:
+        ref = payload.get("ref")
+        if not ref or not isinstance(ref, str) or not ref.strip():
+            raise MalformedGitHubEvent("Missing required push field: ref")
         installation = payload.get("installation")
         if not installation or not isinstance(installation, dict):
             raise MalformedGitHubEvent("Missing installation information")
@@ -96,9 +95,7 @@ def normalize_push_event(payload: dict[str, Any], delivery_id: str) -> GitHubPus
         if not default_branch or not isinstance(default_branch, str) or not default_branch.strip():
             default_branch = "main"
 
-        ref = payload.get("ref")
-        if not ref or not isinstance(ref, str):
-            return None
+
 
         before_sha = payload.get("before")
         after_sha = payload.get("after")

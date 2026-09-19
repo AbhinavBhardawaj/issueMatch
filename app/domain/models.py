@@ -66,6 +66,12 @@ class ExistingIssue(BaseModel):
     state: str
     body_summary: str = ""
 
+from enum import Enum
+
+class ContextCompleteness(str, Enum):
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+
 class RepoContext(BaseModel):
     model_config = ConfigDict(frozen=True)
     
@@ -79,4 +85,8 @@ class RepoContext(BaseModel):
     readme: str = ""
     existing_issues: list[ExistingIssue] = Field(default_factory=list)
     test_files: list[RepoContextFile] = Field(default_factory=list)
+    caller_files: list[RepoContextFile] = Field(default_factory=list)
     total_context_bytes: int = 0
+    context_completeness: ContextCompleteness = ContextCompleteness.COMPLETE
+    partial_reasons: list[str] = Field(default_factory=list)
+    omissions: list[str] = Field(default_factory=list)
