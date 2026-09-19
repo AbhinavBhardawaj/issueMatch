@@ -46,3 +46,8 @@ htmlcov/
 keys/
 get_repo.py
 verify_github_auth.py
+
+# Temporary editor/system files
+*.swp
+*.swo
+tmp/
