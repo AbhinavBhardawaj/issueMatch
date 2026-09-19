@@ -20,6 +20,9 @@ class FakeGitHubClient:
         self.create_error: Optional[Exception | list[Exception | None]] = None
         self.create_call_count = 0
 
+    async def get_repository(self, owner: str, repo: str) -> dict:
+        return {"id": "R-123", "owner": owner, "name": repo}
+
     async def create_issue(self, owner: str, repo: str, title: str, body: str, labels: list[str] | None = None) -> dict:
         self.create_call_count += 1
         if self.create_error:
@@ -41,61 +44,73 @@ class FakeGitHubClient:
 def fake_client():
     return FakeGitHubClient()
 
-def test_ic1_gate_deny(make_finding, make_verification, make_dedup_result, make_gate_result, fake_client):
+def test_ic1_gate_deny(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store, fake_client):
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result(decision=GateDecision.DENY, reason="EVIDENCE_NOT_SUPPORTED")
     dedup_result = make_dedup_result(finding)
+    er = make_evidence_result(finding)
+    rc = make_repo_context()
 
     async def run():
         with pytest.raises(Unauthorized, match="Gate denied"):
             await create_issue_if_authorized(
-                gate_result, dedup_result, finding, verification, fake_client, "owner", "repo"
+                gate_result, dedup_result, finding, verification, fake_client, "test-owner", "test-repo",
+                evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
             )
     asyncio.run(run())
     assert len(fake_client.issues_created) == 0
 
-def test_ic2_marker_found(make_finding, make_verification, make_dedup_result, make_gate_result, fake_client):
+def test_ic2_marker_found(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store, fake_client):
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result()
     dedup_result = make_dedup_result(finding)
+    er = make_evidence_result(finding)
+    rc = make_repo_context()
     
     marker = f"<!-- opencontrib:finding:{finding.finding_id}:v:{verification.verification_id} -->"
     fake_client.search_results.append({"number": 99, "body": marker})
 
     result = asyncio.run(create_issue_if_authorized(
-        gate_result, dedup_result, finding, verification, fake_client, "owner", "repo"
+        gate_result, dedup_result, finding, verification, fake_client, "test-owner", "test-repo",
+        evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
     ))
     
     assert result.issue_number == 99
     assert result.was_existing is True
     assert len(fake_client.issues_created) == 0
 
-def test_ic3_normal_creation(make_finding, make_verification, make_dedup_result, make_gate_result, fake_client):
+def test_ic3_normal_creation(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store, fake_client):
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result()
     dedup_result = make_dedup_result(finding)
+    er = make_evidence_result(finding)
+    rc = make_repo_context()
 
     result = asyncio.run(create_issue_if_authorized(
-        gate_result, dedup_result, finding, verification, fake_client, "owner", "repo"
+        gate_result, dedup_result, finding, verification, fake_client, "test-owner", "test-repo",
+        evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
     ))
     
     assert result.issue_number == 42
     assert result.was_existing is False
     assert len(fake_client.issues_created) == 1
 
-def test_ic4_500_retry_success(make_finding, make_verification, make_dedup_result, make_gate_result, fake_client):
+def test_ic4_500_retry_success(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store, fake_client):
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result()
     dedup_result = make_dedup_result(finding)
+    er = make_evidence_result(finding)
+    rc = make_repo_context()
     
     fake_client.create_error = [GitHubAPIError("Server Error", 500), None]
 
     result = asyncio.run(create_issue_if_authorized(
-        gate_result, dedup_result, finding, verification, fake_client, "owner", "repo"
+        gate_result, dedup_result, finding, verification, fake_client, "test-owner", "test-repo",
+        evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
     ))
     
     assert result.issue_number == 42
@@ -103,40 +118,48 @@ def test_ic4_500_retry_success(make_finding, make_verification, make_dedup_resul
     assert fake_client.create_call_count == 2
     assert len(fake_client.issues_created) == 1
 
-def test_ic5_429_retry_after(make_finding, make_verification, make_dedup_result, make_gate_result, fake_client):
+def test_ic5_429_retry_after(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store, fake_client):
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result()
     dedup_result = make_dedup_result(finding)
+    er = make_evidence_result(finding)
+    rc = make_repo_context()
     
     fake_client.create_error = [GitHubAPIError("Rate Limit", 429, retry_after=0), None]
 
     result = asyncio.run(create_issue_if_authorized(
-        gate_result, dedup_result, finding, verification, fake_client, "owner", "repo"
+        gate_result, dedup_result, finding, verification, fake_client, "test-owner", "test-repo",
+        evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
     ))
     
     assert result.issue_number == 42
     assert fake_client.create_call_count == 2
     assert len(fake_client.issues_created) == 1
 
-def test_ic6_timeout_reconciliation(make_finding, make_verification, make_dedup_result, make_gate_result):
+def test_ic6_timeout_reconciliation(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store):
+    from app.github.client import GitHubAmbiguousWriteError
+
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result()
     dedup_result = make_dedup_result(finding)
+    er = make_evidence_result(finding)
+    rc = make_repo_context()
     
-    marker = f"<!-- opencontrib:finding:{finding.finding_id}:v:{verification.verification_id} -->"
+    sig_marker = f"<!-- opencontrib:signature:{dedup_result.signature} -->"
     
     class DynamicFakeClient(FakeGitHubClient):
         async def create_issue(self, owner, repo, title, body, labels=None):
             self.create_call_count += 1
-            self.search_results.append({"number": 100, "body": marker})
-            raise TimeoutError("Simulated timeout")
+            self.search_results.append({"number": 100, "body": sig_marker})
+            raise GitHubAmbiguousWriteError("Timeout during issue creation POST")
             
     client = DynamicFakeClient()
     
     result = asyncio.run(create_issue_if_authorized(
-        gate_result, dedup_result, finding, verification, client, "owner", "repo"
+        gate_result, dedup_result, finding, verification, client, "test-owner", "test-repo",
+        evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
     ))
     
     assert result.issue_number == 100

@@ -38,7 +38,8 @@ async def run_verifier(
         
     status_map = {
         "VERIFIED": VerificationStatus.VERIFIED,
-        "REJECTED": VerificationStatus.REJECTED
+        "REJECTED": VerificationStatus.REJECTED,
+        "NEEDS_MORE_CONTEXT": VerificationStatus.NEEDS_MORE_CONTEXT,
     }
     
     return Verification(
@@ -49,5 +50,8 @@ async def run_verifier(
         commit_sha=finding.commit_sha,
         status=status_map[llm_response.status],
         reason=llm_response.reason,
-        confidence=llm_response.confidence
+        confidence=llm_response.confidence,
+        supporting_evidence=llm_response.supporting_evidence,
+        counter_evidence=llm_response.counter_evidence,
+        duplicate_issue=llm_response.duplicate_issue,
     )

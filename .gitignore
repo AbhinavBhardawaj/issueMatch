@@ -43,8 +43,18 @@ htmlcov/
 .idea/
 
 .agents/
-/keys/
+# Keys and certificates
+keys/
 *.pem
-node_modules/
+*.key
 get_repo.py
 verify_github_auth.py
+
+# Node / frontend dependencies
+node_modules/
+frontend/node_modules/
+
+# Temporary editor/system files
+*.swp
+*.swo
+tmp/

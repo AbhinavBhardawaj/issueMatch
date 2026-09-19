@@ -21,22 +21,25 @@ def post_verifier_recheck(
     repo_context: RepoContext
 ) -> RecheckResult:
     
-    if verification.finding_id != finding.finding_id:
+    if str(verification.finding_id) != str(finding.finding_id):
         return RecheckResult(status=RecheckStatus.FAIL, reason="FINDING_ID_MISMATCH")
         
-    if verification.installation_id != finding.installation_id:
+    if str(verification.installation_id) != str(finding.installation_id):
         return RecheckResult(status=RecheckStatus.FAIL, reason="INSTALLATION_MISMATCH")
         
-    if verification.repository_id != finding.repository_id:
+    if str(verification.repository_id) != str(finding.repository_id):
         return RecheckResult(status=RecheckStatus.FAIL, reason="REPOSITORY_MISMATCH")
         
-    if verification.commit_sha != finding.commit_sha:
+    if str(verification.commit_sha) != str(finding.commit_sha):
         return RecheckResult(status=RecheckStatus.FAIL, reason="COMMIT_SHA_MISMATCH")
-        
-    if repo_context.repository_id != finding.repository_id:
+
+    if str(repo_context.installation_id) != str(finding.installation_id):
+        return RecheckResult(status=RecheckStatus.FAIL, reason="REPO_CONTEXT_INSTALLATION_MISMATCH")
+
+    if str(repo_context.repository_id) != str(finding.repository_id):
         return RecheckResult(status=RecheckStatus.FAIL, reason="REPO_CONTEXT_REPOSITORY_MISMATCH")
         
-    if repo_context.commit_sha != finding.commit_sha:
+    if str(repo_context.commit_sha) != str(finding.commit_sha):
         return RecheckResult(status=RecheckStatus.FAIL, reason="REPO_CONTEXT_COMMIT_SHA_MISMATCH")
         
     fresh_evidence_result = validate_evidence(finding, repo_context)

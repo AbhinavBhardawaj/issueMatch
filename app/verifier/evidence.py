@@ -55,12 +55,21 @@ def _check_snippet_found(content: str, line: int, snippet: str) -> bool:
             return True
     return False
 
-def _check_function_exists(content: str, function_name: str) -> bool | None:
+def _check_function_exists(content: str, function_name: str, target_line: int | None = None) -> bool | None:
     try:
         tree = ast.parse(content)
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if node.name == function_name:
+                    if target_line is not None:
+                        end_lineno = getattr(node, "end_lineno", None)
+                        if end_lineno is not None:
+                            if node.lineno <= target_line <= end_lineno:
+                                return True
+                            else:
+                                continue
+                        else:
+                            return True
                     return True
         return False
     except SyntaxError:
@@ -117,7 +126,7 @@ def validate_evidence(finding: Finding, repo_context: RepoContext) -> EvidenceVa
             
         function_exists = None
         if finding.function and _can_analyse_functions(evidence_item.file):
-            function_exists = _check_function_exists(content, finding.function)
+            function_exists = _check_function_exists(content, finding.function, target_line=evidence_item.line)
             if function_exists is False:
                 results.append(EvidenceItemResult(
                     file=evidence_item.file,

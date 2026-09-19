@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.domain.states import FindingStatus, VerificationStatus
 
 class EvidenceItem(BaseModel):
@@ -7,6 +7,13 @@ class EvidenceItem(BaseModel):
     file: str
     line: int = Field(ge=1)
     snippet: str
+
+    @field_validator("snippet")
+    @classmethod
+    def validate_snippet_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Evidence snippet cannot be empty or whitespace only")
+        return v
 
 class Finding(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -17,6 +24,7 @@ class Finding(BaseModel):
     commit_sha: str
     title: str
     severity: str
+    category: str = ""
     file: str
     function: str | None = None
     line: int | None = None
@@ -37,8 +45,8 @@ class Verification(BaseModel):
     commit_sha: str
     status: VerificationStatus
     reason: str
-    supporting_evidence: list[dict] = Field(default_factory=list)
-    counter_evidence: list[dict] = Field(default_factory=list)
+    supporting_evidence: list[dict | str] = Field(default_factory=list)
+    counter_evidence: list[dict | str] = Field(default_factory=list)
     duplicate_issue: bool = False
     confidence: float = Field(ge=0, le=1)
     verified_at: str = ""
@@ -58,6 +66,12 @@ class ExistingIssue(BaseModel):
     state: str
     body_summary: str = ""
 
+from enum import Enum
+
+class ContextCompleteness(str, Enum):
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+
 class RepoContext(BaseModel):
     model_config = ConfigDict(frozen=True)
     
@@ -71,4 +85,8 @@ class RepoContext(BaseModel):
     readme: str = ""
     existing_issues: list[ExistingIssue] = Field(default_factory=list)
     test_files: list[RepoContextFile] = Field(default_factory=list)
+    caller_files: list[RepoContextFile] = Field(default_factory=list)
     total_context_bytes: int = 0
+    context_completeness: ContextCompleteness = ContextCompleteness.COMPLETE
+    partial_reasons: list[str] = Field(default_factory=list)
+    omissions: list[str] = Field(default_factory=list)

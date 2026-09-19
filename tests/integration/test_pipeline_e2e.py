@@ -15,6 +15,8 @@ from app.services.pipeline import VerifierPipeline
 
 def get_installation_token():
     """Helper to dynamically generate a token using the private key."""
+    if os.environ.get("RUN_LIVE_GITHUB_TESTS") != "1":
+        return None
     token = os.environ.get("GH_INSTALLATION_TOKEN")
     if token:
         return token
@@ -81,9 +83,9 @@ async def test_e2e_creates_issue_in_nitiflow():
     assert ev.overall == EvidenceStatus.SUPPORTED, f"Evidence failed: {ev}"
 
     llm = MultiLLMProvider(load_providers())
-    pipeline = VerifierPipeline(llm, client)
+    pipeline = VerifierPipeline(llm)
 
-    result = await pipeline.run(finding, repo_context, owner, repo_name)
+    result = await pipeline.run(finding, repo_context, owner, repo_name, github_write_client=client)
 
     assert result is not None, "Pipeline returned None — issue was not created"
     assert result.issue_number > 0
@@ -136,9 +138,9 @@ async def test_e2e_rejects_false_positive():
     assert ev.overall == EvidenceStatus.SUPPORTED
 
     llm = MultiLLMProvider(load_providers())
-    pipeline = VerifierPipeline(llm, client)
+    pipeline = VerifierPipeline(llm)
 
-    result = await pipeline.run(finding, repo_context, owner, repo_name)
+    result = await pipeline.run(finding, repo_context, owner, repo_name, github_write_client=client)
     
     # The LLM should reject it, meaning the pipeline returns None!
     assert result is None, "Pipeline created an issue for a false positive!"
