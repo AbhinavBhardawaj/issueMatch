@@ -1,19 +1,18 @@
 # IssueMatch
 
-The GitHub integration is assembled with `app.main.create_app(webhook_secret, candidate_service)`.
+IssueMatch integrates two core capabilities:
+1. **Candidate Pipeline**: Evaluates contributor issue comments using AI analysis (Strands/Ollama), manages candidate rankings and lifecycle transitions, and persists state in DynamoDB (production) or memory (local development).
+2. **Issue Scout & Verifier**: Durably ingests GitHub push events via SQLite, performs code defect detection (Scout), independently audits findings using adversarial verification, and deterministically authorizes GitHub issue creation.
+
+The application is assembled with `app.main.create_production_app()` for production or `app.main.create_app(webhook_secret, candidate_service)` / `app.main.create_application(...)` for tests.
 
 Production wiring supplies:
 
-* a persistent `CandidateRepository`
+* a persistent `CandidateRepository` (DynamoDB or in-memory)
 * an installation-scoped GitHub client factory
 * Developer B's implementation of `AnalysisService`
-
-The cross-team contract is deliberately small:
-
-* input: `app.models.CandidateSubmission` and `app.models.RepositoryAnalysisContext`
-* output: `app.models.ApproachAnalysis`
-
-The included `InMemoryCandidateRepository` is only for local development and tests.
+* SQLite durable webhook delivery queue, deduplication store, and issue write journal
+* `DurableWebhookWorker` for lease-managed execution of push and issue events
 
 ## Analysis Architecture
 
@@ -440,3 +439,48 @@ The `issues.assigned` and `issues.unassigned` webhooks update assignment state.
 Unassignment clears the recommendation and resumes the oldest waiting approach;
 if no eligible approach remains, the issue returns to `WAITING_FOR_CANDIDATES`.
 The bot only recommends contributors and never invokes GitHub's assignment API.
+
+## Issue Scout & Verifier Architecture
+
+The Scout and Verifier subsystem processes push events deterministically:
+
+```text
+GitHub push webhook (raw-body HMAC verified)
+    ↓
+SQLite delivery queue (idempotent deduplication over SHA-256 body hash)
+    ↓
+DurableWebhookWorker (lease-managed processing, crash-resilient)
+    ↓
+Issue Scout Agent (identifies potential bugs/regressions grounded in commit diff & repo context)
+    ↓
+Deterministic Worthiness Policy (verifies severity, novelty, and relevance)
+    ↓
+Independent Verifier Pipeline (adversarial challenge using independent counter-evidence context)
+    ↓
+Deterministic Evidence & Policy Gate (validates citation coverage, SHA binding, and rate limits)
+    ↓
+IssueCreator (writes issue to GitHub repository only if strictly authorized)
+```
+
+### Key Principles & Safeguards
+* **AI Proposes, AI Challenges, Deterministic Code Authorizes**: External write operations (creating issues) can only be authorized by deterministic policy code with verified evidence and citation checks.
+* **Role Separation**: Scout and Verifier utilize separate LLM routing and never share internal memory or prompt contexts.
+* **Durable Single-Executor**: Webhooks are durably enqueued in SQLite. The `DurableWebhookWorker` is the sole execution owner, preventing race conditions and double execution.
+
+## Issue Scout & Verifier Testing Tiers
+
+The system clearly distinguishes three tiers of end-to-end verification:
+
+### 1. AUTOMATED E2E
+- **Scope:** Synthetic signed webhook delivery + real FastAPI wiring + real SQLite durable queue + real worker + controlled deterministic LLM & GitHub dependencies.
+- **Location:** `tests/integration/test_pipeline_e2e_scenarios.py`
+- **Execution:** Runs in standard CI/local runs (`pytest -q tests/integration/test_pipeline_e2e_scenarios.py`).
+
+### 2. LIVE PROVIDER E2E
+- **Scope:** Real GitHub APIs (authentication, trees, contents, issue writes) + real Scout & Verifier LLM providers.
+- **Location:** `tests/integration/test_live_scout_verifier_e2e.py`
+- **Safety:** Strictly guarded by `RUN_LIVE_SCOUT_E2E=1`, sandbox repository identification check, and explicit permission flags. Skips honestly when credentials are not configured.
+
+### 3. FINAL LIVE ACCEPTANCE
+- **Scope:** Actual `git push` by developer -> actual GitHub App webhook delivery -> SQLite durable queue -> real Scout Agent -> real Verifier Pipeline -> deterministic gate -> real GitHub issue created or rejected.
+- **Runner:** `scripts/run_live_webhook_receiver.py` (receives live webhooks over an exposed tunnel).

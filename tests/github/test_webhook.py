@@ -39,5 +39,7 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(self.client.post("/webhooks/github",content=raw,headers=self._headers(b"other")).status_code,401)
 
     def test_unsupported_ignored_and_malformed_rejected(self):
-        raw=body(); self.assertEqual(self.client.post("/webhooks/github",content=raw,headers=self._headers(raw,event="push")).json()["status"],"ignored")
+        raw=body(); self.assertEqual(self.client.post("/webhooks/github",content=raw,headers=self._headers(raw,event="star")).json()["status"],"ignored")
+        # Explicit push with missing fields must be treated as malformed (400), not ignored
+        self.assertEqual(self.client.post("/webhooks/github",content=raw,headers=self._headers(raw,event="push")).status_code, 400)
         raw=b"{"; self.assertEqual(self.client.post("/webhooks/github",content=raw,headers=self._headers(raw)).status_code,400)
