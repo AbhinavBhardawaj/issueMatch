@@ -34,12 +34,16 @@ def _sanitize_mentions(text: str) -> str:
 def _build_reconciliation_marker(finding_id: str, verification_id: str) -> str:
     return f"<!-- opencontrib:finding:{finding_id}:v:{verification_id} -->"
 
-def _format_issue_body(finding: Finding, verification: Verification) -> str:
+def _build_signature_marker(signature: str) -> str:
+    return f"<!-- opencontrib:signature:{signature} -->"
+
+def _format_issue_body(finding: Finding, verification: Verification, signature: str = "") -> str:
     evidence_text = ""
     for ev in finding.evidence:
         evidence_text += f"- `{ev.file}:{ev.line}`: `{ev.snippet}`\n"
         
     marker = _build_reconciliation_marker(finding.finding_id, verification.verification_id)
+    sig_marker = _build_signature_marker(signature) if signature else ""
     
     body = f"""## Problem
 {finding.description}
@@ -59,16 +63,19 @@ Reason: {verification.reason}
 ## Suggested Investigation
 Please check the mentioned file and lines.
 
-{marker}"""
+{marker}
+{sig_marker}"""
     return body
 
-async def _find_existing_issue_by_marker(finding: Finding, verification: Verification, github_client: IssueWriteClient, owner: str, repo_name: str) -> dict | None:
+async def _find_existing_issue_by_marker(finding: Finding, verification: Verification, github_client: IssueWriteClient, owner: str, repo_name: str, signature: str = "") -> dict | None:
     marker = _build_reconciliation_marker(finding.finding_id, verification.verification_id)
-    # Use exact match in body logic. The search query string syntax depends on client, assuming a generic search.
+    sig_marker = _build_signature_marker(signature) if signature else ""
+    
     query = f"repo:{owner}/{repo_name} {marker}"
     issues = await github_client.search_issues(owner, repo_name, query)
     for issue in issues:
-        if marker in issue.get("body", ""):
+        body = issue.get("body", "")
+        if marker in body or (sig_marker and sig_marker in body):
             return issue
     return None
 
@@ -86,8 +93,18 @@ async def create_issue_if_authorized(
         
     if dedup_result.finding_id != finding.finding_id:
         raise Unauthorized("Dedup reservation mismatch")
-        
-    existing_issue = await _find_existing_issue_by_marker(finding, verification, github_client, owner, repo_name)
+
+    # Defense-in-depth: independently re-validate critical authorization invariants
+    if verification.status.value != "VERIFIED":
+        raise Unauthorized("Verification status must be VERIFIED")
+    if verification.finding_id != finding.finding_id:
+        raise Unauthorized("Verification finding_id mismatch")
+    if len(finding.evidence) == 0:
+        raise Unauthorized("Finding must contain evidence")
+
+    existing_issue = await _find_existing_issue_by_marker(
+        finding, verification, github_client, owner, repo_name, signature=dedup_result.signature
+    )
     if existing_issue:
         return IssueCreationResult(
             issue_number=existing_issue["number"], 
@@ -95,7 +112,7 @@ async def create_issue_if_authorized(
             finding_id=finding.finding_id
         )
         
-    body = _format_issue_body(finding, verification)
+    body = _format_issue_body(finding, verification, signature=dedup_result.signature)
     sanitized_body = _sanitize_mentions(body)
     
     retries = 0

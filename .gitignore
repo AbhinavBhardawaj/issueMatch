@@ -43,3 +43,12 @@ htmlcov/
 .idea/
 
 .agents/
+
+# Keys and certificates
+keys/
+*.pem
+*.key
+
+# Node / frontend dependencies
+node_modules/
+frontend/node_modules/

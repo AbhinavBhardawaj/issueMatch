@@ -17,14 +17,14 @@ async def fetch_repo_context(
     # Always try to fetch README.md
     unique_paths.add("README.md")
     
-    async def fetch_file(path: str) -> RepoContextFile:
+    async def fetch_file(path: str) -> RepoContextFile | None:
         try:
             content = await client.get_file_content(owner, repo_name, path, finding.commit_sha)
             return RepoContextFile(path=path, content=content, size_bytes=len(content.encode('utf-8')))
-        except GitHubClientError:
-            # Mark as empty if not found or error. 
-            # The evidence validator will mark it CONTRADICTED if evidence was expected here.
-            return RepoContextFile(path=path, content="", size_bytes=0)
+        except (GitHubClientError, Exception):
+            # Missing or inaccessible files are omitted from files list.
+            # Downstream validate_evidence will mark evidence CONTRADICTED if evidence file is missing.
+            return None
             
     file_tasks = [fetch_file(p) for p in unique_paths]
     fetched_files = await asyncio.gather(*file_tasks)
@@ -32,6 +32,8 @@ async def fetch_repo_context(
     readme = None
     files = []
     for f in fetched_files:
+        if f is None:
+            continue
         if f.path.lower() == "readme.md":
             readme = f
         else:

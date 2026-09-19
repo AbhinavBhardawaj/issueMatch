@@ -101,6 +101,32 @@ class CohereProvider:
             data = resp.json()
             return data["message"]["content"][0]["text"]
 
+class NvidiaNimProvider:
+    def __init__(self, api_key: str, model: str | None = None):
+        self.api_key = api_key
+        self.model = model or os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+        
+    async def complete(self, system: str, user: str) -> str:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                "https://integrate.api.nvidia.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user}
+                    ],
+                    "temperature": 0.1
+                }
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+
 def load_providers() -> List[LLMProvider]:
     providers: List[LLMProvider] = []
     
@@ -116,6 +142,7 @@ def load_providers() -> List[LLMProvider]:
     add_keys("GEMINI_API_KEYS", GeminiProvider)
     add_keys("MISTRAL_API_KEYS", MistralProvider)
     add_keys("COHERE_API_KEYS", CohereProvider)
+    add_keys("NVIDIA_API_KEYS", NvidiaNimProvider)
     
     if not providers:
         raise LLMInvocationError("No providers loaded")

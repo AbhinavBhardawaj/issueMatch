@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 from app.verifier.schemas import LLMInvocationError
 from app.infrastructure.llm_router import (
     load_providers, MultiLLMProvider,
-    GroqProvider, GeminiProvider, MistralProvider, CohereProvider
+    GroqProvider, GeminiProvider, MistralProvider, CohereProvider, NvidiaNimProvider
 )
 
 class DummyProvider:
@@ -160,6 +160,7 @@ def test_lr11_load_providers_skips_empty():
 
 def test_lr12_load_providers_order():
     env = {
+        "NVIDIA_API_KEYS": "nv1",
         "COHERE_API_KEYS": "c1",
         "MISTRAL_API_KEYS": "m1,m2",
         "GEMINI_API_KEYS": "g1",
@@ -168,10 +169,13 @@ def test_lr12_load_providers_order():
     with patch.dict(os.environ, env, clear=True):
         providers = load_providers()
         
-    assert len(providers) == 6
+    assert len(providers) == 7
     assert isinstance(providers[0], GroqProvider)
     assert isinstance(providers[1], GroqProvider)
     assert isinstance(providers[2], GeminiProvider)
     assert isinstance(providers[3], MistralProvider)
     assert isinstance(providers[4], MistralProvider)
     assert isinstance(providers[5], CohereProvider)
+    assert isinstance(providers[6], NvidiaNimProvider)
+    assert providers[6].api_key == "nv1"
+

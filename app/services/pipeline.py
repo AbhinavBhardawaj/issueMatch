@@ -16,9 +16,10 @@ class VerifierPipeline:
         self,
         llm_provider: LLMProvider,
         github_write_client: IssueWriteClient,
+        dedup_store: InMemoryDedupStore | None = None,
     ):
         self.llm_provider = llm_provider
-        self.dedup_store = InMemoryDedupStore()
+        self.dedup_store = dedup_store or InMemoryDedupStore()
         self.github_write_client = github_write_client
 
     async def run(

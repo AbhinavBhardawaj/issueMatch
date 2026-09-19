@@ -36,6 +36,9 @@ async def verify_endpoint(
     request: VerifyRequest,
     auth: GitHubAppAuthenticator = Depends(get_authenticator)
 ):
+    if os.environ.get("ENABLE_DEV_VERIFY_API", "").lower() not in ("true", "1", "yes"):
+        raise HTTPException(status_code=404, detail="Dev verify endpoint is disabled")
+
     try:
         finding = Finding(**request.finding)
     except Exception as e:

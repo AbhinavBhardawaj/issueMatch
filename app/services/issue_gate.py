@@ -138,11 +138,29 @@ def should_create_issue(
     if dedup_result.is_duplicate:
         return GateResult(decision=GateDecision.DENY, reason="DUPLICATE")
         
+    if dedup_result.finding_id != finding.finding_id:
+        return GateResult(decision=GateDecision.DENY, reason="DEDUP_RESERVATION_MISMATCH")
+        
     signature = normalized_finding_signature(finding.repository_id, finding.file, finding.function, finding.description)
     if signature != dedup_result.signature:
         return GateResult(decision=GateDecision.DENY, reason="SIGNATURE_MISMATCH")
         
-    if dedup_result.finding_id != finding.finding_id:
-        return GateResult(decision=GateDecision.DENY, reason="DEDUP_RESERVATION_MISMATCH")
+    if repo_context.repository_id != finding.repository_id:
+        return GateResult(decision=GateDecision.DENY, reason="REPO_CONTEXT_REPOSITORY_MISMATCH")
+        
+    if repo_context.installation_id != finding.installation_id:
+        return GateResult(decision=GateDecision.DENY, reason="REPO_CONTEXT_INSTALLATION_MISMATCH")
+        
+    if repo_context.commit_sha != finding.commit_sha:
+        return GateResult(decision=GateDecision.DENY, reason="REPO_CONTEXT_COMMIT_SHA_MISMATCH")
+
+    if verification.duplicate_issue or check_existing_github_issues(finding, repo_context.existing_issues):
+        return GateResult(decision=GateDecision.DENY, reason="EXISTING_GITHUB_ISSUE")
+
+    # Security findings publication guard: do not publish public GitHub issues for security category
+    # Must be held for manual review
+    finding_category = getattr(finding, "category", "") or getattr(finding, "severity", "")
+    if hasattr(finding, "category") and getattr(finding, "category") == "security":
+        return GateResult(decision=GateDecision.DENY, reason="SECURITY_MANUAL_REVIEW_REQUIRED")
         
     return GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")

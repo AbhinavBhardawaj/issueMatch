@@ -21,6 +21,7 @@ class GitHubClient(Protocol):
     async def create_issue_comment(self, owner: str, repo: str, number: int, body: str) -> dict[str, Any]: ...
     async def create_issue(self, owner: str, repo: str, title: str, body: str, labels: list[str] | None = None) -> dict[str, Any]: ...
     async def search_issues(self, owner: str, repo: str, query: str) -> list[dict[str, Any]]: ...
+    async def compare_commits(self, owner: str, repo: str, before_sha: str, after_sha: str) -> dict[str, Any]: ...
 
 
 class GitHubRestClient:
@@ -60,3 +61,5 @@ class GitHubRestClient:
     async def search_issues(self, owner: str, repo: str, query: str) -> list[dict[str, Any]]:
         data = await self._request("GET", "/search/issues", params={"q": f"{query} repo:{owner}/{repo}"})
         return data.get("items", [])
+    async def compare_commits(self, owner: str, repo: str, before_sha: str, after_sha: str) -> dict[str, Any]:
+        return await self._request("GET", f"/repos/{owner}/{repo}/compare/{before_sha}...{after_sha}")

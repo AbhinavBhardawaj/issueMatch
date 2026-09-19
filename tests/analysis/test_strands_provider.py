@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("strands")
 
 from app.analysis.strands_provider import StrandsAnalysisProvider
 
