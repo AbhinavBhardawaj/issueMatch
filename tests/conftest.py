@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from app.domain.states import FindingStatus, VerificationStatus, EvidenceStatus
 from app.domain.models import (
@@ -190,7 +191,7 @@ def make_dedup_result(make_finding, make_dedup_store):
     def _make(finding=None, dedup_store=None, **overrides):
         f = finding or make_finding()
         store = dedup_store or make_dedup_store
-        res = store.check_and_reserve(f)
+        res = asyncio.run(store.check_and_reserve(f))
         if overrides:
             d = res.model_dump()
             d.update(overrides)

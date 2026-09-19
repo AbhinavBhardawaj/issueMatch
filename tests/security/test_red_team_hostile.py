@@ -376,7 +376,8 @@ async def test_attack_9_delivery_replay_and_mismatch():
 # ATTACK 10: DUPLICATE ISSUE
 # Same defect across different runs -> dedup prevents second issue creation.
 # ====================================================================
-def test_attack_10_duplicate_defect_suppressed():
+@pytest.mark.asyncio
+async def test_attack_10_duplicate_defect_suppressed():
     store = InMemoryDedupStore()
     f1 = Finding(
         finding_id="F-1",
@@ -391,7 +392,7 @@ def test_attack_10_duplicate_defect_suppressed():
         evidence=[EvidenceItem(file="calc.py", line=1, snippet="x/y")],
         confidence=0.95,
     )
-    r1 = store.check_and_reserve(f1)
+    r1 = await store.check_and_reserve(f1)
     assert r1.is_duplicate is False
 
     # Second run on a later commit with identical defect
@@ -408,7 +409,7 @@ def test_attack_10_duplicate_defect_suppressed():
         evidence=[EvidenceItem(file="calc.py", line=1, snippet="x/y")],
         confidence=0.95,
     )
-    r2 = store.check_and_reserve(f2)
+    r2 = await store.check_and_reserve(f2)
     assert r2.is_duplicate is True
 
 
@@ -447,7 +448,7 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
     )
     gate = GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
     dedup_store = InMemoryDedupStore()
-    dedup = dedup_store.check_and_reserve(finding)
+    dedup = await dedup_store.check_and_reserve(finding)
 
     client = AsyncMock()
     client.get_repository = AsyncMock(return_value={"id": "2", "name": "repo"})

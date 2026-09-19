@@ -6,19 +6,23 @@ from app.verifier.evidence import validate_evidence
 from app.verifier.agent import run_verifier, LLMProvider
 from app.verifier.schemas import LLMInvocationError, MalformedVerifierResponse
 from app.verifier.deterministic import post_verifier_recheck, RecheckStatus
-from app.services.issue_gate import should_create_issue, GateDecision, InMemoryDedupStore
+from app.services.issue_gate import should_create_issue, GateDecision, DedupStore, InMemoryDedupStore
+from app.services.write_journal import IssueWriteJournal, InMemoryIssueWriteJournal
 from app.services.issue_creator import create_issue_if_authorized, IssueWriteClient
 
 logger = logging.getLogger(__name__)
+
 
 class VerifierPipeline:
     def __init__(
         self,
         llm_provider: LLMProvider,
-        dedup_store: InMemoryDedupStore | None = None,
+        dedup_store: DedupStore | None = None,
+        write_journal: IssueWriteJournal | None = None,
     ):
         self.llm_provider = llm_provider
         self.dedup_store = dedup_store or InMemoryDedupStore()
+        self.write_journal = write_journal or InMemoryIssueWriteJournal()
 
     async def run(
         self,
@@ -29,7 +33,6 @@ class VerifierPipeline:
         *,
         github_write_client: IssueWriteClient,
     ):
-
         # 0. Initial transition: DISCOVERED -> VERIFYING
         if finding.status == FindingStatus.DISCOVERED:
             finding = transition_finding(finding, FindingStatus.VERIFYING)
@@ -64,8 +67,8 @@ class VerifierPipeline:
         # Only after successful recheck: transition to VERIFIED
         finding = transition_finding(finding, FindingStatus.VERIFIED)
 
-        # 4. Dedup check
-        dedup_result = self.dedup_store.check_and_reserve(finding)
+        # 4. Dedup check (asynchronous)
+        dedup_result = await self.dedup_store.check_and_reserve(finding)
 
         # 5. Gate decision
         gate_result = should_create_issue(finding, verification, evidence_result, repo_context, dedup_result)
@@ -86,6 +89,7 @@ class VerifierPipeline:
             evidence_result=evidence_result,
             repo_context=repo_context,
             dedup_store=self.dedup_store,
+            write_journal=self.write_journal,
         )
 
         finding = transition_finding(finding, FindingStatus.ISSUE_CREATED)

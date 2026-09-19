@@ -10,32 +10,35 @@ from app.services.issue_gate import (
 from app.domain.models import ExistingIssue
 
 # DD1
-def test_first_reservation(make_finding):
+@pytest.mark.asyncio
+async def test_first_reservation(make_finding):
     store = InMemoryDedupStore()
     f = make_finding()
-    res = store.check_and_reserve(f)
+    res = await store.check_and_reserve(f)
     assert not res.is_duplicate
     assert res.reason == "New reservation"
 
 # DD2
-def test_same_finding_twice(make_finding):
+@pytest.mark.asyncio
+async def test_same_finding_twice(make_finding):
     store = InMemoryDedupStore()
     f = make_finding()
-    res1 = store.check_and_reserve(f)
+    res1 = await store.check_and_reserve(f)
     assert not res1.is_duplicate
     
-    res2 = store.check_and_reserve(f)
+    res2 = await store.check_and_reserve(f)
     assert not res2.is_duplicate
     assert res2.reason == "Own reservation"
 
 # DD3
-def test_different_finding_same_sig(make_finding):
+@pytest.mark.asyncio
+async def test_different_finding_same_sig(make_finding):
     store = InMemoryDedupStore()
     f1 = make_finding(finding_id="F-1")
     f2 = make_finding(finding_id="F-2") # identical otherwise
     
-    res1 = store.check_and_reserve(f1)
-    res2 = store.check_and_reserve(f2)
+    res1 = await store.check_and_reserve(f1)
+    res2 = await store.check_and_reserve(f2)
     
     assert not res1.is_duplicate
     assert res2.is_duplicate
@@ -43,42 +46,45 @@ def test_different_finding_same_sig(make_finding):
     assert res2.finding_id == "F-1" # Returns the ID of the owner
 
 # DD4
-def test_title_change_same_sig(make_finding):
+@pytest.mark.asyncio
+async def test_title_change_same_sig(make_finding):
     store = InMemoryDedupStore()
     f1 = make_finding(finding_id="F-1", title="Title A")
     f2 = make_finding(finding_id="F-2", title="Title B") # only title changed
     
-    store.check_and_reserve(f1)
-    res2 = store.check_and_reserve(f2)
+    await store.check_and_reserve(f1)
+    res2 = await store.check_and_reserve(f2)
     
     assert res2.is_duplicate
 
 # DD5
-def test_different_defect_not_duplicate(make_finding):
+@pytest.mark.asyncio
+async def test_different_defect_not_duplicate(make_finding):
     store = InMemoryDedupStore()
     f1 = make_finding(finding_id="F-1", function="func_a", description="Defect A")
     f2 = make_finding(finding_id="F-2", function="func_b", description="Defect B")
     
-    res1 = store.check_and_reserve(f1)
-    res2 = store.check_and_reserve(f2)
+    res1 = await store.check_and_reserve(f1)
+    res2 = await store.check_and_reserve(f2)
     
     assert not res1.is_duplicate
     assert not res2.is_duplicate
 
 # DD6
-def test_stale_reservation_overwritten(make_finding):
+@pytest.mark.asyncio
+async def test_stale_reservation_overwritten(make_finding):
     store = InMemoryDedupStore()
     f1 = make_finding(finding_id="F-1")
     f2 = make_finding(finding_id="F-2")
     
-    res1 = store.check_and_reserve(f1)
+    res1 = await store.check_and_reserve(f1)
     assert not res1.is_duplicate
     
     # Manually backdate the reservation to be stale
     sig = res1.signature
-    store._reservations[sig]["timestamp"] = datetime.now(timezone.utc) - timedelta(seconds=STALE_RESERVATION_SECONDS + 10)
+    store._reservations[sig]["lease_expires_at"] = time.time() - (STALE_RESERVATION_SECONDS + 10)
     
-    res2 = store.check_and_reserve(f2)
+    res2 = await store.check_and_reserve(f2)
     assert not res2.is_duplicate
     assert res2.reason == "Overwrote stale reservation"
     assert res2.finding_id == "F-2"

@@ -1,4 +1,4 @@
-"""FastAPI webhook endpoint with raw-body HMAC verification and local delivery idempotency."""
+"""FastAPI webhook endpoint with raw-body HMAC verification and durable delivery idempotency."""
 import hashlib
 import hmac
 import json
@@ -85,10 +85,23 @@ def create_github_webhook_router(
         else:
             return {"status": "ignored"}
 
-        # 3. Local delivery idempotency claim over exact raw body hash
+        # 3. Durable delivery enqueue over exact raw body hash
         body_hash = hashlib.sha256(raw_body).hexdigest()
-        if delivery_store:
-            claim_result = await delivery_store.claim(delivery_id, body_hash)
+        active_store = delivery_store
+        if active_store is None and hasattr(request.app.state, "delivery_store"):
+            active_store = getattr(request.app.state, "delivery_store", None)
+
+        if active_store:
+            if hasattr(active_store, "claim_and_enqueue"):
+                claim_result = await active_store.claim_and_enqueue(
+                    delivery_id=delivery_id,
+                    body_hash=body_hash,
+                    event_type=event_name,
+                    payload_json=raw_body.decode("utf-8", errors="replace"),
+                )
+            else:
+                claim_result = await active_store.claim(delivery_id, body_hash)
+
             if claim_result.status == DeliveryClaimStatus.DUPLICATE:
                 return {"status": "duplicate_delivery_ignored"}
             elif claim_result.status == DeliveryClaimStatus.MISMATCHED_PAYLOAD:
@@ -96,8 +109,17 @@ def create_github_webhook_router(
                     status_code=400,
                     detail="Delivery ID payload mismatch: delivery already claimed with different content",
                 )
+            elif claim_result.status == DeliveryClaimStatus.EXHAUSTED:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Delivery has already exhausted all retry attempts and failed terminally",
+                )
 
-        # 4. Dispatch processing and manage delivery lifecycle
+        # 4. Notify worker and queue execution
+        worker = getattr(request.app.state, "webhook_worker", None)
+        if worker and hasattr(worker, "notify"):
+            worker.notify()
+
         if push_event:
             active_scout_service = scout_service
             if active_scout_service is None and hasattr(request.app.state, "scout_service"):
@@ -108,14 +130,14 @@ def create_github_webhook_router(
                     try:
                         res = await active_scout_service.process_push(push_event)
                         if res and getattr(res, "failures", None):
-                            if delivery_store:
-                                await delivery_store.fail(delivery_id, body_hash)
+                            if active_store:
+                                await active_store.fail(delivery_id, body_hash)
                         else:
-                            if delivery_store:
-                                await delivery_store.complete(delivery_id, body_hash)
+                            if active_store:
+                                await active_store.complete(delivery_id, body_hash)
                     except Exception:
-                        if delivery_store:
-                            await delivery_store.fail(delivery_id, body_hash)
+                        if active_store:
+                            await active_store.fail(delivery_id, body_hash)
                         raise
 
                 background_tasks.add_task(_process_push_wrapped)
@@ -131,15 +153,17 @@ def create_github_webhook_router(
                 async def _process_comment_wrapped():
                     try:
                         await active_candidate_service.process_issue_comment(comment_event)
-                        if delivery_store:
-                            await delivery_store.complete(delivery_id, body_hash)
+                        if active_store:
+                            await active_store.complete(delivery_id, body_hash)
                     except Exception:
-                        if delivery_store:
-                            await delivery_store.fail(delivery_id, body_hash)
+                        if active_store:
+                            await active_store.fail(delivery_id, body_hash)
                         raise
 
                 background_tasks.add_task(_process_comment_wrapped)
 
             return {"status": "accepted"}
+
+        return {"status": "ignored"}
 
     return router

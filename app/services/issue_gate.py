@@ -2,15 +2,23 @@ import hashlib
 import json
 import re
 import secrets
+import time
 from datetime import datetime, timezone
-import threading
+import asyncio
 from enum import Enum
+from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 from app.domain.states import VerificationStatus, EvidenceStatus
 from app.domain.models import Finding, Verification, RepoContext, ExistingIssue
 from app.verifier.evidence import EvidenceValidationResult
+from app.storage.sqlite import get_db_connection, init_schema
 
-# Dedup Logic
+
+class DedupState(str, Enum):
+    RESERVED = "RESERVED"
+    WRITE_PENDING = "WRITE_PENDING"
+    COMMITTED = "COMMITTED"
+
 
 class DedupResult(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -21,7 +29,10 @@ class DedupResult(BaseModel):
     reason: str
     reservation_token: str = ""
 
-STALE_RESERVATION_SECONDS: int = 300
+
+DEFAULT_RESERVATION_TTL: float = 300.0
+STALE_RESERVATION_SECONDS: float = DEFAULT_RESERVATION_TTL
+
 
 def _normalize_description(description: str) -> str:
     desc = description[:120].lower()
@@ -29,16 +40,18 @@ def _normalize_description(description: str) -> str:
     desc = re.sub(r'\s+', ' ', desc).strip()
     return desc
 
+
 def _normalize_text(text: str) -> str:
     t = text.lower()
     t = re.sub(r'[^a-z0-9\s]', '', t)
     return re.sub(r'\s+', ' ', t).strip()
 
+
 def _normalize_snippet(snippet: str) -> str:
-    # Normalize code snippet: strip lines, ignore blank lines, collapse whitespace
     lines = [line.strip() for line in snippet.strip().splitlines() if line.strip()]
     joined = " ".join(lines).lower()
     return re.sub(r'\s+', ' ', joined).strip()
+
 
 def compute_defect_signature(
     repository_id: str,
@@ -48,16 +61,6 @@ def compute_defect_signature(
     expected_behavior: str = "",
     evidence_snippet: str = "",
 ) -> str:
-    """
-    Stable deterministic defect signature based on structured identity:
-    - repository_id
-    - normalized file path
-    - normalized function
-    - normalized category
-    - normalized expected_behavior
-    - normalized primary evidence snippet
-    Independent of finding_id, verification_id, commit_sha, line number, or free-form description.
-    """
     payload = {
         "repository_id": str(repository_id).strip(),
         "file": file.strip().lower().replace("\\", "/"),
@@ -67,6 +70,7 @@ def compute_defect_signature(
         "evidence_snippet": _normalize_snippet(evidence_snippet),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
 
 def compute_finding_signature(finding: Finding) -> str:
     primary_snippet = finding.evidence[0].snippet if finding.evidence else ""
@@ -78,6 +82,7 @@ def compute_finding_signature(finding: Finding) -> str:
         expected_behavior=getattr(finding, "expected_behavior", ""),
         evidence_snippet=primary_snippet,
     )
+
 
 def normalized_finding_signature(
     repository_id: str | Finding,
@@ -99,7 +104,6 @@ def normalized_finding_signature(
             expected_behavior=expected_behavior,
             evidence_snippet=evidence_snippet,
         )
-    # Legacy fallback for callers passing (repo, file, func, desc)
     normalized = _normalize_description(description)
     payload = json.dumps({
         "repository_id": str(repository_id),
@@ -109,56 +113,116 @@ def normalized_finding_signature(
     }, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
+
+class DedupStore(Protocol):
+    async def check_and_reserve(self, finding: Finding) -> DedupResult: ...
+    async def validate_reservation(self, finding: Finding, dedup_result: DedupResult) -> bool: ...
+    async def renew_reservation(self, finding: Finding, reservation_token: str, additional_seconds: float = 300.0) -> bool: ...
+    async def transition_to_write_pending(self, signature: str, finding_id: str, reservation_token: str) -> bool: ...
+    async def commit_reservation(self, signature: str, finding_id: str, issue_number: int) -> bool: ...
+    async def get_reservation(self, signature: str) -> dict | None: ...
+
+
 class InMemoryDedupStore:
-    def __init__(self):
+    def __init__(self, reservation_ttl: float = DEFAULT_RESERVATION_TTL):
+        self.reservation_ttl = reservation_ttl
         self._reservations: dict[str, dict] = {}
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
 
-    def check_and_reserve(self, finding: Finding) -> DedupResult:
+    async def check_and_reserve(self, finding: Finding) -> DedupResult:
         signature = compute_finding_signature(finding)
-        now = datetime.now(timezone.utc)
+        now = time.time()
 
-        with self._lock:
+        async with self._lock:
             if signature in self._reservations:
                 reservation = self._reservations[signature]
-                if reservation["finding_id"] == finding.finding_id:
+                state = reservation.get("state", DedupState.RESERVED.value)
+
+                if state == DedupState.COMMITTED.value:
                     return DedupResult(
                         signature=signature,
-                        finding_id=finding.finding_id,
-                        is_duplicate=False,
-                        reason="Own reservation",
-                        reservation_token=reservation.get("reservation_token", ""),
+                        finding_id=reservation["finding_id"],
+                        is_duplicate=True,
+                        reason=f"Already committed as issue #{reservation.get('issue_number')}",
+                        reservation_token="",
                     )
 
-                age_seconds = (now - reservation["timestamp"]).total_seconds()
-                if age_seconds > STALE_RESERVATION_SECONDS:
+                if state == DedupState.WRITE_PENDING.value:
+                    if reservation["finding_id"] == finding.finding_id:
+                        return DedupResult(
+                            signature=signature,
+                            finding_id=finding.finding_id,
+                            is_duplicate=False,
+                            reason="Own write-pending reservation",
+                            reservation_token=reservation.get("reservation_token", ""),
+                        )
+                    return DedupResult(
+                        signature=signature,
+                        finding_id=reservation["finding_id"],
+                        is_duplicate=True,
+                        reason="Issue write in progress by another worker",
+                        reservation_token="",
+                    )
+
+                # state == RESERVED
+                if reservation["finding_id"] == finding.finding_id:
+                    if reservation["lease_expires_at"] > now:
+                        return DedupResult(
+                            signature=signature,
+                            finding_id=finding.finding_id,
+                            is_duplicate=False,
+                            reason="Own reservation",
+                            reservation_token=reservation.get("reservation_token", ""),
+                        )
                     token = secrets.token_hex(32)
-                    self._reservations[signature] = {
-                        "finding_id": finding.finding_id,
-                        "timestamp": now,
-                        "reservation_token": token,
-                    }
+                    reservation["reservation_token"] = token
+                    reservation["lease_expires_at"] = now + self.reservation_ttl
+                    reservation["updated_at"] = now
                     return DedupResult(
                         signature=signature,
                         finding_id=finding.finding_id,
                         is_duplicate=False,
-                        reason="Overwrote stale reservation",
+                        reason="Renewed expired own reservation",
                         reservation_token=token,
                     )
 
+                # Different finding_id
+                if reservation["lease_expires_at"] > now:
+                    return DedupResult(
+                        signature=signature,
+                        finding_id=reservation["finding_id"],
+                        is_duplicate=True,
+                        reason="Active reservation exists",
+                        reservation_token="",
+                    )
+
+                token = secrets.token_hex(32)
+                self._reservations[signature] = {
+                    "finding_id": finding.finding_id,
+                    "reservation_token": token,
+                    "state": DedupState.RESERVED.value,
+                    "issue_number": None,
+                    "created_at": now,
+                    "lease_expires_at": now + self.reservation_ttl,
+                    "updated_at": now,
+                }
                 return DedupResult(
                     signature=signature,
-                    finding_id=reservation["finding_id"],
-                    is_duplicate=True,
-                    reason="Active reservation exists",
-                    reservation_token="",
+                    finding_id=finding.finding_id,
+                    is_duplicate=False,
+                    reason="Overwrote stale reservation",
+                    reservation_token=token,
                 )
 
             token = secrets.token_hex(32)
             self._reservations[signature] = {
                 "finding_id": finding.finding_id,
-                "timestamp": now,
                 "reservation_token": token,
+                "state": DedupState.RESERVED.value,
+                "issue_number": None,
+                "created_at": now,
+                "lease_expires_at": now + self.reservation_ttl,
+                "updated_at": now,
             }
             return DedupResult(
                 signature=signature,
@@ -168,16 +232,7 @@ class InMemoryDedupStore:
                 reservation_token=token,
             )
 
-    def validate_reservation(self, finding: Finding, dedup_result: DedupResult) -> bool:
-        """
-        Thread-safe validation confirming reservation authenticity:
-        - non-empty reservation_token
-        - signature matches compute_finding_signature(finding)
-        - signature exists in store
-        - finding_id matches
-        - reservation_token matches stored token (constant time)
-        - reservation has not expired / been replaced
-        """
+    async def validate_reservation(self, finding: Finding, dedup_result: DedupResult) -> bool:
         if not dedup_result.reservation_token:
             return False
 
@@ -185,7 +240,7 @@ class InMemoryDedupStore:
         if dedup_result.signature != expected_signature:
             return False
 
-        with self._lock:
+        async with self._lock:
             stored = self._reservations.get(dedup_result.signature)
             if not stored:
                 return False
@@ -194,10 +249,309 @@ class InMemoryDedupStore:
             stored_token = stored.get("reservation_token", "")
             if not secrets.compare_digest(stored_token, dedup_result.reservation_token):
                 return False
-            now = datetime.now(timezone.utc)
-            if (now - stored["timestamp"]).total_seconds() > STALE_RESERVATION_SECONDS:
+            state = stored.get("state", DedupState.RESERVED.value)
+            if state not in (DedupState.RESERVED.value, DedupState.WRITE_PENDING.value):
+                return False
+            if state == DedupState.RESERVED.value and stored.get("lease_expires_at", 0) <= time.time():
                 return False
             return True
+
+    async def renew_reservation(self, finding: Finding, reservation_token: str, additional_seconds: float = 300.0) -> bool:
+        expected_signature = compute_finding_signature(finding)
+        async with self._lock:
+            stored = self._reservations.get(expected_signature)
+            if not stored:
+                return False
+            if stored.get("finding_id") != finding.finding_id:
+                return False
+            if not secrets.compare_digest(stored.get("reservation_token", ""), reservation_token):
+                return False
+            now = time.time()
+            stored["lease_expires_at"] = max(stored.get("lease_expires_at", 0), now) + additional_seconds
+            stored["updated_at"] = now
+            return True
+
+    async def transition_to_write_pending(self, signature: str, finding_id: str, reservation_token: str) -> bool:
+        now = time.time()
+        async with self._lock:
+            stored = self._reservations.get(signature)
+            if not stored:
+                return False
+            if stored.get("finding_id") != finding_id:
+                return False
+            if not secrets.compare_digest(stored.get("reservation_token", ""), reservation_token):
+                return False
+            if stored.get("state") != DedupState.RESERVED.value:
+                return False
+            if stored.get("lease_expires_at", 0) <= now:
+                return False
+            stored["state"] = DedupState.WRITE_PENDING.value
+            stored["updated_at"] = now
+            return True
+
+    async def commit_reservation(self, signature: str, finding_id: str, issue_number: int) -> bool:
+        now = time.time()
+        async with self._lock:
+            stored = self._reservations.get(signature)
+            if stored:
+                stored["state"] = DedupState.COMMITTED.value
+                stored["issue_number"] = issue_number
+                stored["updated_at"] = now
+                return True
+            self._reservations[signature] = {
+                "finding_id": finding_id,
+                "reservation_token": "",
+                "state": DedupState.COMMITTED.value,
+                "issue_number": issue_number,
+                "created_at": now,
+                "lease_expires_at": float("inf"),
+                "updated_at": now,
+            }
+            return True
+
+    async def get_reservation(self, signature: str) -> dict | None:
+        async with self._lock:
+            stored = self._reservations.get(signature)
+            return dict(stored) if stored else None
+
+
+class SQLiteDedupStore:
+    def __init__(self, db_path: str, reservation_ttl: float = DEFAULT_RESERVATION_TTL):
+        self.db_path = db_path
+        self.reservation_ttl = reservation_ttl
+        self._initialized = False
+
+    async def _ensure_init(self) -> None:
+        if not self._initialized:
+            await init_schema(self.db_path)
+            self._initialized = True
+
+    async def check_and_reserve(self, finding: Finding) -> DedupResult:
+        await self._ensure_init()
+        signature = compute_finding_signature(finding)
+        now = time.time()
+
+        async with await get_db_connection(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE;")
+            async with db.execute(
+                "SELECT finding_id, reservation_token, state, issue_number, lease_expires_at FROM dedup_reservations WHERE signature = ?;",
+                (signature,),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if row:
+                state = row["state"]
+                row_finding_id = row["finding_id"]
+                token = row["reservation_token"]
+                issue_number = row["issue_number"]
+                lease_expires_at = row["lease_expires_at"]
+
+                if state == DedupState.COMMITTED.value:
+                    await db.rollback()
+                    return DedupResult(
+                        signature=signature,
+                        finding_id=row_finding_id,
+                        is_duplicate=True,
+                        reason=f"Already committed as issue #{issue_number}",
+                        reservation_token="",
+                    )
+
+                if state == DedupState.WRITE_PENDING.value:
+                    await db.rollback()
+                    if row_finding_id == finding.finding_id:
+                        return DedupResult(
+                            signature=signature,
+                            finding_id=finding.finding_id,
+                            is_duplicate=False,
+                            reason="Own write-pending reservation",
+                            reservation_token=token,
+                        )
+                    return DedupResult(
+                        signature=signature,
+                        finding_id=row_finding_id,
+                        is_duplicate=True,
+                        reason="Issue write in progress by another worker",
+                        reservation_token="",
+                    )
+
+                # state == RESERVED
+                if row_finding_id == finding.finding_id:
+                    if lease_expires_at > now:
+                        await db.rollback()
+                        return DedupResult(
+                            signature=signature,
+                            finding_id=finding.finding_id,
+                            is_duplicate=False,
+                            reason="Own reservation",
+                            reservation_token=token,
+                        )
+                    new_token = secrets.token_hex(32)
+                    new_lease = now + self.reservation_ttl
+                    await db.execute(
+                        "UPDATE dedup_reservations SET reservation_token = ?, lease_expires_at = ?, updated_at = ? WHERE signature = ?;",
+                        (new_token, new_lease, now, signature),
+                    )
+                    await db.commit()
+                    return DedupResult(
+                        signature=signature,
+                        finding_id=finding.finding_id,
+                        is_duplicate=False,
+                        reason="Renewed expired own reservation",
+                        reservation_token=new_token,
+                    )
+
+                # Different finding_id
+                if lease_expires_at > now:
+                    await db.rollback()
+                    return DedupResult(
+                        signature=signature,
+                        finding_id=row_finding_id,
+                        is_duplicate=True,
+                        reason="Active reservation exists",
+                        reservation_token="",
+                    )
+
+                new_token = secrets.token_hex(32)
+                new_lease = now + self.reservation_ttl
+                await db.execute(
+                    "UPDATE dedup_reservations SET finding_id = ?, reservation_token = ?, lease_expires_at = ?, updated_at = ? WHERE signature = ?;",
+                    (finding.finding_id, new_token, new_lease, now, signature),
+                )
+                await db.commit()
+                return DedupResult(
+                    signature=signature,
+                    finding_id=finding.finding_id,
+                    is_duplicate=False,
+                    reason="Overwrote stale reservation",
+                    reservation_token=new_token,
+                )
+
+            new_token = secrets.token_hex(32)
+            new_lease = now + self.reservation_ttl
+            await db.execute(
+                """
+                INSERT INTO dedup_reservations (
+                    signature, finding_id, reservation_token, state, issue_number,
+                    created_at, lease_expires_at, updated_at
+                ) VALUES (?, ?, ?, 'RESERVED', NULL, ?, ?, ?);
+                """,
+                (signature, finding.finding_id, new_token, now, new_lease, now),
+            )
+            await db.commit()
+            return DedupResult(
+                signature=signature,
+                finding_id=finding.finding_id,
+                is_duplicate=False,
+                reason="New reservation",
+                reservation_token=new_token,
+            )
+
+    async def validate_reservation(self, finding: Finding, dedup_result: DedupResult) -> bool:
+        if not dedup_result.reservation_token:
+            return False
+
+        expected_signature = compute_finding_signature(finding)
+        if dedup_result.signature != expected_signature:
+            return False
+
+        await self._ensure_init()
+        now = time.time()
+        async with await get_db_connection(self.db_path) as db:
+            async with db.execute(
+                "SELECT finding_id, reservation_token, state, lease_expires_at FROM dedup_reservations WHERE signature = ?;",
+                (dedup_result.signature,),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                return False
+            if str(row["finding_id"]) != str(finding.finding_id):
+                return False
+            if not secrets.compare_digest(row["reservation_token"], dedup_result.reservation_token):
+                return False
+            state = row["state"]
+            if state not in (DedupState.RESERVED.value, DedupState.WRITE_PENDING.value):
+                return False
+            if state == DedupState.RESERVED.value and row["lease_expires_at"] <= now:
+                return False
+            return True
+
+    async def renew_reservation(self, finding: Finding, reservation_token: str, additional_seconds: float = 300.0) -> bool:
+        await self._ensure_init()
+        signature = compute_finding_signature(finding)
+        now = time.time()
+        async with await get_db_connection(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE;")
+            cursor = await db.execute(
+                """
+                UPDATE dedup_reservations
+                SET lease_expires_at = MAX(lease_expires_at, ?) + ?, updated_at = ?
+                WHERE signature = ? AND finding_id = ? AND reservation_token = ? AND state = 'RESERVED';
+                """,
+                (now, additional_seconds, now, signature, finding.finding_id, reservation_token),
+            )
+            updated = cursor.rowcount > 0
+            if updated:
+                await db.commit()
+            else:
+                await db.rollback()
+            return updated
+
+    async def transition_to_write_pending(self, signature: str, finding_id: str, reservation_token: str) -> bool:
+        await self._ensure_init()
+        now = time.time()
+        async with await get_db_connection(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE;")
+            cursor = await db.execute(
+                """
+                UPDATE dedup_reservations
+                SET state = 'WRITE_PENDING', updated_at = ?
+                WHERE signature = ? AND finding_id = ? AND reservation_token = ? AND state = 'RESERVED' AND lease_expires_at > ?;
+                """,
+                (now, signature, finding_id, reservation_token, now),
+            )
+            updated = cursor.rowcount > 0
+            if updated:
+                await db.commit()
+            else:
+                await db.rollback()
+            return updated
+
+    async def commit_reservation(self, signature: str, finding_id: str, issue_number: int) -> bool:
+        await self._ensure_init()
+        now = time.time()
+        async with await get_db_connection(self.db_path) as db:
+            await db.execute("BEGIN IMMEDIATE;")
+            cursor = await db.execute(
+                """
+                UPDATE dedup_reservations
+                SET state = 'COMMITTED', issue_number = ?, updated_at = ?
+                WHERE signature = ?;
+                """,
+                (issue_number, now, signature),
+            )
+            if cursor.rowcount == 0:
+                await db.execute(
+                    """
+                    INSERT INTO dedup_reservations (
+                        signature, finding_id, reservation_token, state, issue_number,
+                        created_at, lease_expires_at, updated_at
+                    ) VALUES (?, ?, '', 'COMMITTED', ?, ?, 1e12, ?);
+                    """,
+                    (signature, finding_id, issue_number, now, now),
+                )
+            await db.commit()
+            return True
+
+    async def get_reservation(self, signature: str) -> dict | None:
+        await self._ensure_init()
+        async with await get_db_connection(self.db_path) as db:
+            async with db.execute(
+                "SELECT * FROM dedup_reservations WHERE signature = ?;", (signature,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
 
 def check_existing_github_issues(finding: Finding, existing_issues: list[ExistingIssue]) -> bool:
     marker = f"opencontrib:finding:{finding.finding_id}"
@@ -209,17 +563,18 @@ def check_existing_github_issues(finding: Finding, existing_issues: list[Existin
             return True
     return False
 
-# Gate Logic
 
 class GateDecision(str, Enum):
     ALLOW = "ALLOW"
     DENY = "DENY"
+
 
 class GateResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     decision: GateDecision
     reason: str
+
 
 def evaluate_issue_authorization(
     finding: Finding,
@@ -228,10 +583,6 @@ def evaluate_issue_authorization(
     repo_context: RepoContext,
     dedup_result: DedupResult
 ) -> GateResult:
-    """
-    Pure deterministic authorization policy.
-    Evaluated by VerifierPipeline and re-evaluated by IssueCreator immediately before write.
-    """
     if verification.status != VerificationStatus.VERIFIED:
         return GateResult(decision=GateDecision.DENY, reason="VERIFIER_NOT_VERIFIED")
 
@@ -316,13 +667,12 @@ def evaluate_issue_authorization(
     if verification.duplicate_issue or check_existing_github_issues(finding, repo_context.existing_issues):
         return GateResult(decision=GateDecision.DENY, reason="EXISTING_GITHUB_ISSUE")
 
-    # Security findings publication guard: do not publish public GitHub issues for security category
-    # Must be held for manual review
     finding_category = (getattr(finding, "category", "") or getattr(finding, "severity", "")).lower()
     if finding_category == "security":
         return GateResult(decision=GateDecision.DENY, reason="SECURITY_MANUAL_REVIEW_REQUIRED")
 
     return GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
+
 
 def should_create_issue(
     finding: Finding,
