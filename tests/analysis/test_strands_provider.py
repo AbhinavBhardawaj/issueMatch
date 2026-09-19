@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pytest
+pytest.importorskip("strands")
 
 from app.analysis.prompts import ANALYSIS_SYSTEM_PROMPT
 from app.analysis.provider import AnalysisProviderResult, EvidenceCitation

@@ -1,45 +1,212 @@
-"""FastAPI webhook endpoint with raw-body HMAC verification."""
+"""FastAPI webhook endpoint with raw-body HMAC verification and durable delivery idempotency."""
 import hashlib
 import hmac
 import json
 import logging
+from typing import Callable, Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
 
 from app.candidates.service import CandidateService
-from app.github.events import MalformedGitHubEvent, normalize_issue_assignment, normalize_issue_comment_created
+from app.github.events import (
+    MalformedGitHubEvent,
+    normalize_issue_assignment,
+    normalize_issue_comment_created,
+    normalize_push_event,
+)
+from app.storage.delivery_store import DeliveryStore, DeliveryClaimStatus
 
 logger = logging.getLogger(__name__)
 
+
 def verify_signature(raw_body: bytes, signature: str | None, secret: str) -> bool:
-    if not signature or not signature.startswith("sha256=") or not secret: return False
+    if not signature or not signature.startswith("sha256=") or not secret:
+        return False
     expected = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
 
-def create_github_webhook_router(webhook_secret: str, candidate_service: CandidateService) -> APIRouter:
+
+def create_github_webhook_router(
+    webhook_secret: str | Callable[[], str],
+    candidate_service: CandidateService | None = None,
+    delivery_store: DeliveryStore | None = None,
+    scout_service: Any = None,
+    max_attempts: int | None = None,
+) -> APIRouter:
     router = APIRouter()
+
     @router.post("/webhooks/github", status_code=status.HTTP_202_ACCEPTED)
-    async def github_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
+    async def github_webhook(
+        request: Request, background_tasks: BackgroundTasks
+    ) -> dict[str, str]:
         raw_body = await request.body()
         signature = request.headers.get("X-Hub-Signature-256")
-        if not verify_signature(raw_body, signature, webhook_secret):
+        resolved_secret = webhook_secret() if callable(webhook_secret) else webhook_secret
+        if not verify_signature(raw_body, signature, resolved_secret):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
-        event_name, delivery_id = request.headers.get("X-GitHub-Event"), request.headers.get("X-GitHub-Delivery")
-        if not delivery_id: raise HTTPException(status_code=400, detail="Missing GitHub delivery ID")
-        if event_name not in {"issues", "issue_comment"}: return {"status": "ignored"}
-        try: payload = json.loads(raw_body)
-        except json.JSONDecodeError: raise HTTPException(status_code=400, detail="Malformed JSON payload")
-        if event_name == "issues":
-            if payload.get("action") not in {"assigned", "unassigned"}:
+
+        event_name = request.headers.get("X-GitHub-Event")
+        delivery_id = request.headers.get("X-GitHub-Delivery")
+        if not delivery_id:
+            raise HTTPException(status_code=400, detail="Missing GitHub delivery ID")
+
+        # Explicit ping handshake: acknowledge immediately with zero processing
+        if event_name == "ping":
+            return {"status": "pong"}
+
+        # 1. Parse JSON payload (must not claim delivery if JSON is malformed)
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Malformed JSON payload")
+
+        # 2. Normalize event envelope (must not claim delivery if event structure is malformed)
+        push_event = None
+        comment_event = None
+        assignment_event = None
+
+        if event_name == "push":
+            try:
+                push_event = normalize_push_event(payload, delivery_id)
+            except MalformedGitHubEvent as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
+            if push_event is None:
+                # Deleted branch, non-default branch, or all-zero after SHA
+                return {"status": "ignored"}
+
+        elif event_name == "issue_comment":
+            if payload.get("action") != "created":
                 return {"status": "ignored"}
             try:
-                assignment = normalize_issue_assignment(payload, delivery_id)
+                comment_event = normalize_issue_comment_created(payload, delivery_id)
+            except MalformedGitHubEvent:
+                raise HTTPException(status_code=400, detail="Malformed issue comment event")
+
+        elif event_name == "issues":
+            if payload.get("action") not in ("assigned", "unassigned"):
+                return {"status": "ignored"}
+            try:
+                assignment_event = normalize_issue_assignment(payload, delivery_id)
             except MalformedGitHubEvent:
                 raise HTTPException(status_code=400, detail="Malformed issue assignment event")
-            background_tasks.add_task(candidate_service.process_issue_assignment, assignment)
+
+        else:
+            return {"status": "ignored"}
+
+        # 3. Durable delivery enqueue over exact raw body hash
+        body_hash = hashlib.sha256(raw_body).hexdigest()
+        active_store = delivery_store
+        if active_store is None and hasattr(request.app.state, "delivery_store"):
+            active_store = getattr(request.app.state, "delivery_store", None)
+
+        effective_max_attempts = max_attempts
+        if effective_max_attempts is None:
+            app_config = getattr(request.app.state, "config", None)
+            if app_config and hasattr(app_config, "worker_max_attempts"):
+                effective_max_attempts = app_config.worker_max_attempts
+            else:
+                effective_max_attempts = 3
+
+        if active_store:
+            if hasattr(active_store, "claim_and_enqueue"):
+                claim_result = await active_store.claim_and_enqueue(
+                    delivery_id=delivery_id,
+                    body_hash=body_hash,
+                    event_type=event_name,
+                    payload_json=raw_body.decode("utf-8", errors="replace"),
+                    max_attempts=effective_max_attempts,
+                )
+            else:
+                claim_result = await active_store.claim(delivery_id, body_hash)
+
+            if claim_result.status == DeliveryClaimStatus.DUPLICATE:
+                return {"status": "duplicate_delivery_ignored"}
+            elif claim_result.status == DeliveryClaimStatus.MISMATCHED_PAYLOAD:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Delivery ID payload mismatch: delivery already claimed with different content",
+                )
+            elif claim_result.status == DeliveryClaimStatus.EXHAUSTED:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Delivery has already exhausted all retry attempts and failed terminally",
+                )
+
+        # 4. Check for durable queue mode vs legacy direct mode
+        is_durable_mode = getattr(active_store, "is_durable", False) or hasattr(active_store, "claim_next_available_job")
+
+        if is_durable_mode:
+            # Durable queue mode: DurableWebhookWorker is sole execution owner.
+            # Never schedule FastAPI BackgroundTasks when a durable store is active.
+            worker = getattr(request.app.state, "webhook_worker", None)
+            if worker and hasattr(worker, "notify"):
+                worker.notify()
             return {"status": "accepted"}
-        if payload.get("action") != "created": return {"status": "ignored"}
-        try: normalized = normalize_issue_comment_created(payload, delivery_id)
-        except MalformedGitHubEvent: raise HTTPException(status_code=400, detail="Malformed issue comment event")
-        background_tasks.add_task(candidate_service.process_issue_comment, normalized)
-        return {"status": "accepted"}
+
+        # Legacy direct execution mode (e.g. in-memory tests without durable worker)
+        if push_event:
+            active_scout_service = scout_service
+            if active_scout_service is None and hasattr(request.app.state, "scout_service"):
+                active_scout_service = getattr(request.app.state, "scout_service", None)
+
+            if active_scout_service:
+                async def _process_push_wrapped():
+                    try:
+                        res = await active_scout_service.process_push(push_event)
+                        if res and getattr(res, "failures", None):
+                            if active_store:
+                                await active_store.fail(delivery_id, body_hash)
+                        else:
+                            if active_store:
+                                await active_store.complete(delivery_id, body_hash)
+                    except Exception:
+                        if active_store:
+                            await active_store.fail(delivery_id, body_hash)
+                        raise
+
+                background_tasks.add_task(_process_push_wrapped)
+
+            return {"status": "accepted"}
+
+        elif comment_event:
+            active_candidate_service = candidate_service
+            if active_candidate_service is None and hasattr(request.app.state, "candidate_service"):
+                active_candidate_service = getattr(request.app.state, "candidate_service", None)
+
+            if active_candidate_service:
+                async def _process_comment_wrapped():
+                    try:
+                        await active_candidate_service.process_issue_comment(comment_event)
+                        if active_store:
+                            await active_store.complete(delivery_id, body_hash)
+                    except Exception:
+                        if active_store:
+                            await active_store.fail(delivery_id, body_hash)
+                        raise
+
+                background_tasks.add_task(_process_comment_wrapped)
+
+            return {"status": "accepted"}
+
+        elif assignment_event:
+            active_candidate_service = candidate_service
+            if active_candidate_service is None and hasattr(request.app.state, "candidate_service"):
+                active_candidate_service = getattr(request.app.state, "candidate_service", None)
+
+            if active_candidate_service:
+                async def _process_assignment_wrapped():
+                    try:
+                        await active_candidate_service.process_issue_assignment(assignment_event)
+                        if active_store:
+                            await active_store.complete(delivery_id, body_hash)
+                    except Exception:
+                        if active_store:
+                            await active_store.fail(delivery_id, body_hash)
+                        raise
+
+                background_tasks.add_task(_process_assignment_wrapped)
+
+            return {"status": "accepted"}
+
+        return {"status": "ignored"}
     return router

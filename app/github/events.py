@@ -1,4 +1,4 @@
-"""Conversion of untrusted GitHub webhook JSON into internal events."""
+import re
 from datetime import datetime
 from typing import Any
 
@@ -40,6 +40,116 @@ class GitHubIssueAssignmentEvent(BaseModel):
     assignee_username: str
     assignee_github_id: int | None = None
     repository_default_branch: str = "main"
+
+
+class GitHubPushEvent(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    delivery_id: str
+    installation_id: int
+    repository_id: int
+
+    repository_owner: str
+    repository_name: str
+    default_branch: str
+
+    before_sha: str
+    after_sha: str
+    ref: str
+
+    forced: bool = False
+    deleted: bool = False
+
+
+SHA_REGEX = re.compile(r"^[0-9a-fA-F]{40}$")
+ALL_ZERO_SHA = "0" * 40
+
+
+def normalize_push_event(payload: dict[str, Any], delivery_id: str) -> GitHubPushEvent | None:
+    """
+    Deterministically validate and normalize GitHub push webhook payloads.
+    Returns GitHubPushEvent if eligible for Scout analysis (pushes targeting refs/heads/<default_branch>).
+    Returns None if safely ignored (branch deletion, all-zero after SHA, non-default branch).
+    Raises MalformedGitHubEvent on syntactically invalid or untrusted payloads.
+    """
+    if not delivery_id or not delivery_id.strip():
+        raise MalformedGitHubEvent("Missing or empty GitHub delivery ID")
+
+    if not isinstance(payload, dict):
+        raise MalformedGitHubEvent("Payload must be a dictionary")
+
+    try:
+        ref = payload.get("ref")
+        if not ref or not isinstance(ref, str) or not ref.strip():
+            raise MalformedGitHubEvent("Missing required push field: ref")
+        installation = payload.get("installation")
+        if not installation or not isinstance(installation, dict):
+            raise MalformedGitHubEvent("Missing installation information")
+        installation_id = installation.get("id")
+        if not isinstance(installation_id, int) or installation_id <= 0:
+            raise MalformedGitHubEvent("Installation ID must be a positive integer")
+
+        repository = payload.get("repository")
+        if not repository or not isinstance(repository, dict):
+            raise MalformedGitHubEvent("Missing repository information")
+
+        repository_id = repository.get("id")
+        if not isinstance(repository_id, int) or repository_id <= 0:
+            raise MalformedGitHubEvent("Repository ID must be a positive integer")
+
+        owner_dict = repository.get("owner")
+        if not isinstance(owner_dict, dict):
+            raise MalformedGitHubEvent("Missing repository owner")
+        owner = owner_dict.get("login") or owner_dict.get("name")
+        if not owner or not isinstance(owner, str) or not owner.strip():
+            raise MalformedGitHubEvent("Repository owner must be non-empty string")
+
+        repo_name = repository.get("name")
+        if not repo_name or not isinstance(repo_name, str) or not repo_name.strip():
+            raise MalformedGitHubEvent("Repository name must be non-empty string")
+
+        default_branch = repository.get("default_branch")
+        if not default_branch or not isinstance(default_branch, str) or not default_branch.strip():
+            default_branch = "main"
+
+        before_sha = payload.get("before")
+        after_sha = payload.get("after")
+
+        if not before_sha or not isinstance(before_sha, str) or not SHA_REGEX.match(before_sha):
+            raise MalformedGitHubEvent(f"Invalid before SHA: {before_sha}")
+
+        if not after_sha or not isinstance(after_sha, str) or not SHA_REGEX.match(after_sha):
+            raise MalformedGitHubEvent(f"Invalid after SHA: {after_sha}")
+
+        deleted = bool(payload.get("deleted", False))
+        forced = bool(payload.get("forced", False))
+
+        # Check for branch deletion or all-zero after SHA
+        if deleted or after_sha == ALL_ZERO_SHA:
+            return None
+
+        # MVP constraint: only analyze pushes targeting refs/heads/<default_branch>
+        expected_ref = f"refs/heads/{default_branch}"
+        if ref != expected_ref:
+            return None
+
+        return GitHubPushEvent(
+            delivery_id=delivery_id.strip(),
+            installation_id=installation_id,
+            repository_id=repository_id,
+            repository_owner=owner.strip(),
+            repository_name=repo_name.strip(),
+            default_branch=default_branch.strip(),
+            before_sha=before_sha,
+            after_sha=after_sha,
+            ref=ref.strip(),
+            forced=forced,
+            deleted=deleted,
+        )
+    except MalformedGitHubEvent:
+        raise
+    except Exception as exc:
+        raise MalformedGitHubEvent(f"Malformed push event: {str(exc)}") from exc
 
 
 def normalize_issue_comment_created(payload: dict[str, Any], delivery_id: str) -> GitHubIssueCommentEvent:
