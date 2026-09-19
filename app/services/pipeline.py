@@ -85,6 +85,7 @@ class VerifierPipeline:
             repo_name,
             evidence_result=evidence_result,
             repo_context=repo_context,
+            dedup_store=self.dedup_store,
         )
 
         finding = transition_finding(finding, FindingStatus.ISSUE_CREATED)

@@ -55,6 +55,7 @@ def make_read_client(files_dict: dict[str, str]):
 
 def make_write_client(read_client):
     client = AsyncMock()
+    client.get_repository = read_client.get_repository
     client.get_file_content.side_effect = read_client.get_file_content
     client.get_issues.return_value = []
     client.search_issues.return_value = []

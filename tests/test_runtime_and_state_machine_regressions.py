@@ -220,6 +220,7 @@ async def test_e_verified_finding_uses_installation_specific_write_client(
     mock_llm.complete = AsyncMock(return_value=verifier_json)
 
     installation_client = AsyncMock()
+    installation_client.get_repository.return_value = {"id": "R-123", "owner": "test-owner", "name": "test-repo"}
     installation_client.search_issues.return_value = []
     installation_client.create_issue.return_value = {"number": 777, "html_url": "https://github.com/test-owner/test-repo/issues/777"}
 
@@ -252,12 +253,14 @@ async def test_f_concurrent_pushes_use_different_installation_clients_no_leakage
     write clients, with no capability leakage across requests.
     """
     client_111 = AsyncMock()
+    client_111.get_repository.return_value = {"id": 101, "name": "repo1", "owner": {"login": "org1"}}
     client_111.search_issues.return_value = []
     client_111.get_issues.return_value = []
     client_111.get_file_content.return_value = "def foo():\n    return 42\n"
     client_111.create_issue.return_value = {"number": 1111, "html_url": "https://github.com/org1/repo1/issues/1111"}
 
     client_222 = AsyncMock()
+    client_222.get_repository.return_value = {"id": 202, "name": "repo2", "owner": {"login": "org2"}}
     client_222.search_issues.return_value = []
     client_222.get_issues.return_value = []
     client_222.get_file_content.return_value = "def foo():\n    return 42\n"

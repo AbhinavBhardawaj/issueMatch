@@ -446,9 +446,11 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
         confidence=0.9,
     )
     gate = GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
-    dedup = DedupResult(signature=sig, finding_id="F-time", is_duplicate=False, reason="new")
+    dedup_store = InMemoryDedupStore()
+    dedup = dedup_store.check_and_reserve(finding)
 
     client = AsyncMock()
+    client.get_repository = AsyncMock(return_value={"id": "2", "name": "repo"})
     # Call 1 (pre-write search): []
     # Call 2 (post-timeout reconciliation search): [issue with signature]
     client.search_issues.side_effect = [
@@ -487,7 +489,7 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
     )
 
     res = await create_issue_if_authorized(
-        gate, dedup, finding, v, client, "org", "repo", evidence_result=er, repo_context=rc
+        gate, dedup, finding, v, client, "org", "repo", evidence_result=er, repo_context=rc, dedup_store=dedup_store
     )
     assert res.issue_number == 42
     assert res.was_existing is True
@@ -501,7 +503,9 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
 # ====================================================================
 @pytest.mark.asyncio
 async def test_attack_12_forged_gate_rejected_by_issue_creator():
+    dedup_store = InMemoryDedupStore()
     client = AsyncMock()
+    client.get_repository = AsyncMock(return_value={"id": "2", "name": "repo"})
     client.search_issues.return_value = []
     
     finding = Finding(
@@ -548,7 +552,7 @@ async def test_attack_12_forged_gate_rejected_by_issue_creator():
 
     with pytest.raises(Unauthorized):
         await create_issue_if_authorized(
-            forged_gate, dedup, finding, v_rejected, client, "org", "repo", evidence_result=er, repo_context=rc
+            forged_gate, dedup, finding, v_rejected, client, "org", "repo", evidence_result=er, repo_context=rc, dedup_store=dedup_store
         )
     client.create_issue.assert_not_called()
 
@@ -585,7 +589,18 @@ def test_attack_13_security_findings_held_for_manual_review():
     er = EvidenceValidationResult(
         finding_id="F-sec",
         commit_sha="b" * 40,
-        results=[],
+        results=[
+            EvidenceItemResult(
+                file="db.py",
+                line=10,
+                snippet="query = f'SELECT * FROM users WHERE id={user_input}'",
+                file_exists=True,
+                line_exists=True,
+                snippet_found=True,
+                function_exists=True,
+                status=EvidenceStatus.SUPPORTED,
+            )
+        ],
         overall=EvidenceStatus.SUPPORTED,
     )
     rc = RepoContext(

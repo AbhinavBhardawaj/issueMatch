@@ -10,6 +10,7 @@ from app.services.issue_gate import (
     GateResult,
     GateDecision,
     DedupResult,
+    InMemoryDedupStore,
     evaluate_issue_authorization,
 )
 from app.github.client import (
@@ -29,6 +30,7 @@ class IssueWriteClient(Protocol):
     async def create_issue(self, owner: str, repo: str, title: str, body: str, labels: list[str] | None = None) -> dict: ...
     async def search_issues(self, owner: str, repo: str, query: str) -> list[dict]: ...
     async def get_issues(self, owner: str, repo: str, state: str = "all", per_page: int = 30) -> list[dict]: ...
+    async def get_repository(self, owner: str, repo: str) -> dict: ...
 
 class IssueCreationResult(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -164,6 +166,7 @@ async def create_issue_if_authorized(
     *,
     evidence_result: EvidenceValidationResult,
     repo_context: RepoContext,
+    dedup_store: InMemoryDedupStore,
 ) -> IssueCreationResult:
     # 0. Reject caller-supplied DENY immediately
     if gate_result.decision != GateDecision.ALLOW:
@@ -173,7 +176,36 @@ async def create_issue_if_authorized(
     if evidence_result is None or repo_context is None:
         raise Unauthorized("Valid evidence_result and repo_context are mandatory for write authorization")
 
-    # 2. Defense-in-depth: Re-evaluate pure deterministic authorization policy
+    # 2. Write destination binding: actual owner/name must match repo_context
+    if (
+        owner.strip().lower() != repo_context.owner.strip().lower()
+        or repo_name.strip().lower() != repo_context.name.strip().lower()
+    ):
+        raise Unauthorized(
+            f"Write destination mismatch: argument '{owner}/{repo_name}' does not match "
+            f"repo_context '{repo_context.owner}/{repo_context.name}'"
+        )
+
+    # 3. Live numeric GitHub repository identity check
+    try:
+        repo_metadata = await github_client.get_repository(owner, repo_name)
+    except Exception as exc:
+        raise Unauthorized(f"Failed to verify target repository metadata: {exc}") from exc
+
+    if not isinstance(repo_metadata, dict) or "id" not in repo_metadata:
+        raise Unauthorized("Malformed repository metadata from GitHub API")
+
+    if str(repo_metadata["id"]) != str(finding.repository_id):
+        raise Unauthorized(
+            f"Target repository ID mismatch: GitHub returned {repo_metadata.get('id')} "
+            f"but finding expects {finding.repository_id}"
+        )
+
+    # 4. Authentic Dedup reservation validation
+    if dedup_store is None or not dedup_store.validate_reservation(finding, dedup_result):
+        raise Unauthorized("Dedup reservation is invalid, expired, or forged")
+
+    # 5. Defense-in-depth: Re-evaluate pure deterministic authorization policy
     auth_gate = evaluate_issue_authorization(
         finding=finding,
         verification=verification,

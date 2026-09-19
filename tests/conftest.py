@@ -5,7 +5,7 @@ from app.domain.models import (
     RepoContext, RepoContextFile, ExistingIssue
 )
 from app.verifier.evidence import EvidenceItemResult, EvidenceValidationResult
-from app.services.issue_gate import GateResult, GateDecision, DedupResult, normalized_finding_signature, compute_finding_signature
+from app.services.issue_gate import GateResult, GateDecision, DedupResult, InMemoryDedupStore, normalized_finding_signature, compute_finding_signature
 
 @pytest.fixture
 def make_finding():
@@ -182,21 +182,20 @@ def make_evidence_result(make_finding):
     return _make
 
 @pytest.fixture
-def make_dedup_result(make_finding):
-    def _make(finding=None, **overrides):
+def make_dedup_store():
+    return InMemoryDedupStore()
+
+@pytest.fixture
+def make_dedup_result(make_finding, make_dedup_store):
+    def _make(finding=None, dedup_store=None, **overrides):
         f = finding or make_finding()
-        
-        # Auto-compute the correct deterministic signature for the finding
-        sig = compute_finding_signature(f)
-        
-        defaults = {
-            "signature": sig,
-            "finding_id": f.finding_id,
-            "is_duplicate": False,
-            "reason": "No duplicate found"
-        }
-        defaults.update(overrides)
-        return DedupResult(**defaults)
+        store = dedup_store or make_dedup_store
+        res = store.check_and_reserve(f)
+        if overrides:
+            d = res.model_dump()
+            d.update(overrides)
+            return DedupResult(**d)
+        return res
     return _make
 
 @pytest.fixture
