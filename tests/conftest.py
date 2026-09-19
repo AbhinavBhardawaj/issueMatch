@@ -3,7 +3,8 @@ import pytest
 from app.domain.states import FindingStatus, VerificationStatus, EvidenceStatus
 from app.domain.models import (
     Finding, Verification, EvidenceItem,
-    RepoContext, RepoContextFile, ExistingIssue
+    RepoContext, RepoContextFile, ExistingIssue,
+    VerifierEvidence
 )
 from app.verifier.evidence import EvidenceItemResult, EvidenceValidationResult
 from app.services.issue_gate import GateResult, GateDecision, DedupResult, InMemoryDedupStore, normalized_finding_signature, compute_finding_signature
@@ -41,6 +42,15 @@ def make_finding():
 def make_verification(make_finding):
     def _make(finding=None, **overrides):
         f = finding or make_finding()
+        target_status = overrides.get("status", VerificationStatus.VERIFIED)
+        supporting = []
+        if target_status == VerificationStatus.VERIFIED:
+            ev_file = f.evidence[0].file if f.evidence else f.file
+            ev_line = f.evidence[0].line if f.evidence else (f.line or 82)
+            ev_snip = f.evidence[0].snippet if f.evidence else "decoded = jwt.decode(...)"
+            supporting = [
+                VerifierEvidence(file=ev_file, line=ev_line, snippet=ev_snip)
+            ]
         defaults = {
             "verification_id": "V-test001",
             "finding_id": f.finding_id,
@@ -49,7 +59,9 @@ def make_verification(make_finding):
             "commit_sha": f.commit_sha,
             "status": VerificationStatus.VERIFIED,
             "reason": "Looks good",
-            "confidence": 0.95
+            "confidence": 0.95,
+            "supporting_evidence": supporting,
+            "counter_evidence": [],
         }
         defaults.update(overrides)
         return Verification(**defaults)

@@ -111,7 +111,7 @@ def test_signature_resilient_to_line_shift_and_whitespace(make_finding):
 
 
 @pytest.mark.asyncio
-async def test_process_restart_duplicate_recovery_via_signature(make_finding, make_verification, make_dedup_store):
+async def test_process_restart_duplicate_recovery_via_signature(make_finding, make_verification, make_dedup_store, make_repo_context):
     """
     Process restarts with fresh DedupStore, new finding ID, new verification ID.
     Existing issue on GitHub with matching signature marker must be recovered.
@@ -141,7 +141,7 @@ async def test_process_restart_duplicate_recovery_via_signature(make_finding, ma
         )],
         overall=EvidenceStatus.SUPPORTED,
     )
-    rc = RepoContext(
+    rc = make_repo_context(
         repository_id=f.repository_id,
         installation_id=f.installation_id,
         owner="owner",

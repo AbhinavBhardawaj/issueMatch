@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
 from app.github.events import GitHubPushEvent
-from app.domain.models import Finding, Verification, EvidenceItem, RepoContext, RepoContextFile, ExistingIssue
+from app.domain.models import Finding, Verification, EvidenceItem, RepoContext, RepoContextFile, ExistingIssue, VerifierEvidence
 from app.domain.states import FindingStatus, VerificationStatus, EvidenceStatus
 from app.scout.schemas import ScoutFindingDraft, ScoutEvidenceDraft, ScoutResponse
 from app.scout.models import ContextCompleteness, ScoutContext, ScoutFile, SuppressionReason
@@ -445,6 +445,7 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
         status=VerificationStatus.VERIFIED,
         reason="ok",
         confidence=0.9,
+        supporting_evidence=[VerifierEvidence(file="calc.py", line=1, snippet="c")],
     )
     gate = GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
     dedup_store = InMemoryDedupStore()
@@ -486,7 +487,7 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
         owner="org",
         name="repo",
         commit_sha="b" * 40,
-        files=[],
+        files=[RepoContextFile(path="calc.py", content="c\n", size_bytes=2)],
     )
 
     res = await create_issue_if_authorized(
@@ -586,6 +587,7 @@ def test_attack_13_security_findings_held_for_manual_review():
         status=VerificationStatus.VERIFIED,
         reason="Confirmed security bug",
         confidence=0.99,
+        supporting_evidence=[VerifierEvidence(file="db.py", line=10, snippet="query = f'SELECT * FROM users WHERE id={user_input}'")],
     )
     er = EvidenceValidationResult(
         finding_id="F-sec",
@@ -610,7 +612,13 @@ def test_attack_13_security_findings_held_for_manual_review():
         owner="org",
         name="repo",
         commit_sha="b" * 40,
-        files=[],
+        files=[
+            RepoContextFile(
+                path="db.py",
+                content="\n" * 9 + "query = f'SELECT * FROM users WHERE id={user_input}'\n",
+                size_bytes=100,
+            )
+        ],
         readme="",
     )
     from app.services.issue_gate import compute_finding_signature

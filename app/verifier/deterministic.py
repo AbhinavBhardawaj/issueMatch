@@ -1,8 +1,9 @@
 from enum import Enum
 from pydantic import BaseModel, ConfigDict
-from app.domain.states import EvidenceStatus
+from app.domain.states import EvidenceStatus, VerificationStatus
 from app.domain.models import Finding, Verification, RepoContext
 from app.verifier.evidence import validate_evidence, EvidenceValidationResult
+from app.verifier.citation_validator import validate_verifier_citations
 
 class RecheckStatus(str, Enum):
     PASS = "PASS"
@@ -50,5 +51,9 @@ def post_verifier_recheck(
     for item in fresh_evidence_result.results:
         if item.status == EvidenceStatus.CONTRADICTED:
             return RecheckResult(status=RecheckStatus.FAIL, reason="EVIDENCE_ITEM_CONTRADICTED")
-            
+
+    citation_result = validate_verifier_citations(verification, repo_context)
+    if verification.status == VerificationStatus.VERIFIED and not citation_result.valid:
+        return RecheckResult(status=RecheckStatus.FAIL, reason=citation_result.reason)
+
     return RecheckResult(status=RecheckStatus.PASS, reason="ALL_CHECKS_PASSED")

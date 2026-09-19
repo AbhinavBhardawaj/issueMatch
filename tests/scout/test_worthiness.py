@@ -6,6 +6,8 @@ from tests.scout.test_schemas import make_valid_draft_dict
 
 
 def make_context_with_auth_file(completeness=ContextCompleteness.COMPLETE):
+    lines = [f"line {i}" for i in range(1, 100)]
+    lines[41] = "token = header.split(' ')[1]"  # line 42 (1-indexed)
     return ScoutContext(
         installation_id=1,
         repository_id=2,
@@ -17,7 +19,7 @@ def make_context_with_auth_file(completeness=ContextCompleteness.COMPLETE):
         files=[
             ScoutFile(
                 path="app/auth.py",
-                content="\n".join([f"line {i}" for i in range(1, 100)]),
+                content="\n".join(lines),
                 changed=True,
                 size_bytes=500,
             )

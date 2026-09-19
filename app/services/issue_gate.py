@@ -10,7 +10,9 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 from app.domain.states import VerificationStatus, EvidenceStatus
 from app.domain.models import Finding, Verification, RepoContext, ExistingIssue
+from app.domain.normalization import normalize_code, normalize_path
 from app.verifier.evidence import EvidenceValidationResult
+from app.verifier.citation_validator import validate_verifier_citations
 from app.storage.sqlite import get_db_connection, init_schema
 
 
@@ -60,14 +62,14 @@ def compute_defect_signature(
     category: str = "",
     expected_behavior: str = "",
     evidence_snippet: str = "",
+    **kwargs,
 ) -> str:
     payload = {
         "repository_id": str(repository_id).strip(),
-        "file": file.strip().lower().replace("\\", "/"),
-        "function": (function or "").strip().lower(),
+        "file": normalize_path(file),
+        "function": (function or "").strip(),
         "category": (category or "").strip().lower(),
-        "expected_behavior": _normalize_text(expected_behavior),
-        "evidence_snippet": _normalize_snippet(evidence_snippet),
+        "evidence_snippet": normalize_code(evidence_snippet),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -79,7 +81,6 @@ def compute_finding_signature(finding: Finding) -> str:
         file=finding.file,
         function=finding.function,
         category=getattr(finding, "category", ""),
-        expected_behavior=getattr(finding, "expected_behavior", ""),
         evidence_snippet=primary_snippet,
     )
 
@@ -631,10 +632,10 @@ def evaluate_issue_authorization(
             return GateResult(decision=GateDecision.DENY, reason="EVIDENCE_NOT_SUPPORTED")
 
     def _norm_path(p: str) -> str:
-        return p.strip().lower().replace("\\", "/")
+        return normalize_path(p)
 
     def _norm_snip(s: str) -> str:
-        return _normalize_snippet(s)
+        return normalize_code(s)
 
     for ev_item in finding.evidence:
         ev_file = _norm_path(ev_item.file)
@@ -653,6 +654,10 @@ def evaluate_issue_authorization(
                 break
         if not matched:
             return GateResult(decision=GateDecision.DENY, reason="EVIDENCE_COVERAGE_MISMATCH")
+
+    citation_res = validate_verifier_citations(verification, repo_context)
+    if not citation_res.valid:
+        return GateResult(decision=GateDecision.DENY, reason=f"VERIFIER_CITATION_INVALID: {citation_res.reason}")
 
     if dedup_result.is_duplicate:
         return GateResult(decision=GateDecision.DENY, reason="DUPLICATE")

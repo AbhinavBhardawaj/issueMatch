@@ -71,7 +71,7 @@ def test_gate_unaffected(make_finding, make_verification, make_evidence_result, 
     ev = make_evidence_result(f)
     dd = make_dedup_result(f)
     
-    rc = make_repo_context(files=[])
+    rc = make_repo_context()
     
     result = should_create_issue(f, v, ev, rc, dd)
     

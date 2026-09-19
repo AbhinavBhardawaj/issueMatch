@@ -6,6 +6,7 @@ from app.verifier.evidence import validate_evidence
 from app.verifier.agent import run_verifier, LLMProvider
 from app.verifier.schemas import LLMInvocationError, MalformedVerifierResponse
 from app.verifier.deterministic import post_verifier_recheck, RecheckStatus
+from app.verifier.citation_validator import validate_verifier_citations
 from app.services.issue_gate import should_create_issue, GateDecision, DedupStore, InMemoryDedupStore
 from app.services.write_journal import IssueWriteJournal, InMemoryIssueWriteJournal
 from app.services.issue_creator import create_issue_if_authorized, IssueWriteClient
@@ -52,9 +53,24 @@ class VerifierPipeline:
             transition_finding(finding, FindingStatus.VERIFICATION_FAILED)
             return None
 
+        # Immediate citation validation for observability across all outcomes
+        citation_result = validate_verifier_citations(verification, repo_context)
+
         if verification.status != VerificationStatus.VERIFIED:
+            if not citation_result.valid:
+                logger.info(
+                    f"Finding {finding.finding_id} non-authorizing outcome ({verification.status.value}) had invalid citations: {citation_result.reason}"
+                )
             finding = transition_finding(finding, FindingStatus.REJECTED)
             logger.info(f"Finding {finding.finding_id} rejected by LLM: {verification.reason}")
+            return None
+
+        # Fail-closed check for VERIFIED citations
+        if not citation_result.valid:
+            logger.warning(
+                f"Finding {finding.finding_id} claimed VERIFIED but failed citation validation: {citation_result.reason}"
+            )
+            finding = transition_finding(finding, FindingStatus.REJECTED)
             return None
 
         # 3. Post-verifier recheck (performed while Finding is still in VERIFYING state)

@@ -1,5 +1,6 @@
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
+from app.domain.models import VerifierEvidence
 
 class VerifierLLMResponse(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -9,8 +10,8 @@ class VerifierLLMResponse(BaseModel):
     )
     reason: str
     confidence: float = Field(..., ge=0.0, le=1.0)
-    supporting_evidence: list[dict | str] = Field(default_factory=list)
-    counter_evidence: list[dict | str] = Field(default_factory=list)
+    supporting_evidence: list[VerifierEvidence] = Field(default_factory=list)
+    counter_evidence: list[VerifierEvidence] = Field(default_factory=list)
     duplicate_issue: bool = False
 
 class LLMInvocationError(Exception):
