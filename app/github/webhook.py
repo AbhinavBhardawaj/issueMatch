@@ -29,6 +29,7 @@ def create_github_webhook_router(
     candidate_service: CandidateService | None = None,
     delivery_store: DeliveryStore | None = None,
     scout_service: Any = None,
+    max_attempts: int | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -91,6 +92,14 @@ def create_github_webhook_router(
         if active_store is None and hasattr(request.app.state, "delivery_store"):
             active_store = getattr(request.app.state, "delivery_store", None)
 
+        effective_max_attempts = max_attempts
+        if effective_max_attempts is None:
+            app_config = getattr(request.app.state, "config", None)
+            if app_config and hasattr(app_config, "worker_max_attempts"):
+                effective_max_attempts = app_config.worker_max_attempts
+            else:
+                effective_max_attempts = 3
+
         if active_store:
             if hasattr(active_store, "claim_and_enqueue"):
                 claim_result = await active_store.claim_and_enqueue(
@@ -98,6 +107,7 @@ def create_github_webhook_router(
                     body_hash=body_hash,
                     event_type=event_name,
                     payload_json=raw_body.decode("utf-8", errors="replace"),
+                    max_attempts=effective_max_attempts,
                 )
             else:
                 claim_result = await active_store.claim(delivery_id, body_hash)
@@ -115,11 +125,18 @@ def create_github_webhook_router(
                     detail="Delivery has already exhausted all retry attempts and failed terminally",
                 )
 
-        # 4. Notify worker and queue execution
-        worker = getattr(request.app.state, "webhook_worker", None)
-        if worker and hasattr(worker, "notify"):
-            worker.notify()
+        # 4. Check for durable queue mode vs legacy direct mode
+        is_durable_mode = getattr(active_store, "is_durable", False) or hasattr(active_store, "claim_next_available_job")
 
+        if is_durable_mode:
+            # Durable queue mode: DurableWebhookWorker is sole execution owner.
+            # Never schedule FastAPI BackgroundTasks when a durable store is active.
+            worker = getattr(request.app.state, "webhook_worker", None)
+            if worker and hasattr(worker, "notify"):
+                worker.notify()
+            return {"status": "accepted"}
+
+        # Legacy direct execution mode (e.g. in-memory tests without durable worker)
         if push_event:
             active_scout_service = scout_service
             if active_scout_service is None and hasattr(request.app.state, "scout_service"):

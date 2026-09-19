@@ -50,6 +50,8 @@ class InMemoryDeliveryStore:
     Thread-safe, application-scoped in-memory delivery store for testing.
     """
 
+    is_durable: bool = False
+
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._deliveries: dict[str, dict] = {}
@@ -143,6 +145,8 @@ class SQLiteDeliveryStore:
     Durable, crash-resilient SQLite-backed webhook delivery and job store.
     Enforces multi-worker leases, body-hash verification, and atomic state transitions.
     """
+
+    is_durable: bool = True
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path

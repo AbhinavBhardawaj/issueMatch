@@ -99,6 +99,8 @@ def test_ic3_normal_creation(make_finding, make_verification, make_dedup_result,
     assert len(fake_client.issues_created) == 1
 
 def test_ic4_500_retry_success(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store, fake_client):
+    from app.services.write_journal import UnresolvedWriteIntentError
+
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result()
@@ -108,15 +110,15 @@ def test_ic4_500_retry_success(make_finding, make_verification, make_dedup_resul
     
     fake_client.create_error = [GitHubAPIError("Server Error", 500), None]
 
-    result = asyncio.run(create_issue_if_authorized(
-        gate_result, dedup_result, finding, verification, fake_client, "test-owner", "test-repo",
-        evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
-    ))
+    with pytest.raises(UnresolvedWriteIntentError):
+        asyncio.run(create_issue_if_authorized(
+            gate_result, dedup_result, finding, verification, fake_client, "test-owner", "test-repo",
+            evidence_result=er, repo_context=rc, dedup_store=make_dedup_store
+        ))
     
-    assert result.issue_number == 42
-    assert result.was_existing is False
-    assert fake_client.create_call_count == 2
-    assert len(fake_client.issues_created) == 1
+    # 5xx must not blindly issue a second POST (create_call_count == 1)
+    assert fake_client.create_call_count == 1
+    assert len(fake_client.issues_created) == 0
 
 def test_ic5_429_retry_after(make_finding, make_verification, make_dedup_result, make_gate_result, make_evidence_result, make_repo_context, make_dedup_store, fake_client):
     finding = make_finding()

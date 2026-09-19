@@ -143,10 +143,15 @@ async def fetch_repo_context(
     # 3. Direct Static Imports of Primary File
     if primary_content:
         direct_imports = _extract_imports(finding.file, primary_content)
-        import_candidates = [
+        all_import_candidates = [
             p for p in all_tree_paths
             if p not in seen_paths and any(p.endswith(rel) for rel in direct_imports) and _is_supported_path(p)
-        ][:3]
+        ]
+        if len(all_import_candidates) > 3:
+            completeness = ContextCompleteness.PARTIAL
+            partial_reasons.append("IMPORT_CANDIDATE_LIMIT_REACHED")
+        import_candidates = all_import_candidates[:3]
+
         for imp_path in import_candidates:
             if total_bytes >= MAX_VERIFIER_TOTAL_BYTES:
                 completeness = ContextCompleteness.PARTIAL
@@ -169,13 +174,24 @@ async def fetch_repo_context(
     # 4. Search for Callers / References (if finding.function specified)
     if finding.function:
         target_fn = finding.function.strip()
-        candidate_caller_paths = [
+        all_caller_candidates = [
             p for p in all_tree_paths
             if p not in seen_paths and not _is_test_file(p) and _is_supported_path(p)
-        ][:10]
+        ]
+        MAX_CALLER_SCAN_CANDIDATES = 10
+        if len(all_caller_candidates) > MAX_CALLER_SCAN_CANDIDATES:
+            completeness = ContextCompleteness.PARTIAL
+            partial_reasons.append("CALLER_SCAN_LIMIT_REACHED")
+        candidate_caller_paths = all_caller_candidates[:MAX_CALLER_SCAN_CANDIDATES]
 
         for cand_path in candidate_caller_paths:
-            if len(caller_files) >= MAX_VERIFIER_CALLER_FILES or total_bytes >= MAX_VERIFIER_TOTAL_BYTES:
+            if total_bytes >= MAX_VERIFIER_TOTAL_BYTES:
+                completeness = ContextCompleteness.PARTIAL
+                partial_reasons.append("CONTEXT_BUDGET_REACHED")
+                break
+            if len(caller_files) >= MAX_VERIFIER_CALLER_FILES:
+                completeness = ContextCompleteness.PARTIAL
+                partial_reasons.append("CALLER_FILE_LIMIT_REACHED")
                 break
             seen_paths.add(cand_path)
             outcome, content, error_tag = await _fetch_single_file(
@@ -193,13 +209,21 @@ async def fetch_repo_context(
                 omissions.append(f"Could not inspect caller candidate {cand_path} due to {error_tag}")
 
     # 5. Nearby / Relevant Test Files
-    test_candidates = [
+    all_test_candidates = [
         p for p in all_tree_paths
         if p not in seen_paths and _is_test_file(p) and _is_supported_path(p)
-    ][:MAX_VERIFIER_TEST_FILES]
+    ]
+    if len(all_test_candidates) > MAX_VERIFIER_TEST_FILES:
+        completeness = ContextCompleteness.PARTIAL
+        partial_reasons.append("TEST_FILE_LIMIT_REACHED")
+    test_candidates = all_test_candidates[:MAX_VERIFIER_TEST_FILES]
 
     for test_path in test_candidates:
-        if len(test_files) >= MAX_VERIFIER_TEST_FILES or total_bytes >= MAX_VERIFIER_TOTAL_BYTES:
+        if total_bytes >= MAX_VERIFIER_TOTAL_BYTES:
+            completeness = ContextCompleteness.PARTIAL
+            partial_reasons.append("CONTEXT_BUDGET_REACHED")
+            break
+        if len(test_files) >= MAX_VERIFIER_TEST_FILES:
             break
         seen_paths.add(test_path)
         outcome, content, error_tag = await _fetch_single_file(

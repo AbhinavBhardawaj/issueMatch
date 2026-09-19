@@ -31,7 +31,9 @@ class IssueWriteJournal(Protocol):
         reservation_token: str,
     ) -> str: ...
     async def transition_to_posting(self, signature: str, intent_id: str) -> bool: ...
-    async def commit_intent(self, signature: str, intent_id: str, issue_number: int) -> bool: ...
+    async def commit_intent(
+        self, signature: str, intent_id: str, issue_number: int, expected_state: str = "POSTING"
+    ) -> bool: ...
     async def abort_intent(self, signature: str, intent_id: str) -> bool: ...
 
 
@@ -80,15 +82,17 @@ class InMemoryIssueWriteJournal:
 
     async def transition_to_posting(self, signature: str, intent_id: str) -> bool:
         record = self._intents.get(signature)
-        if record and record["intent_id"] == intent_id:
+        if record and record["intent_id"] == intent_id and record["state"] == IntentState.PREPARED.value:
             record["state"] = IntentState.POSTING.value
             record["updated_at"] = time.time()
             return True
         return False
 
-    async def commit_intent(self, signature: str, intent_id: str, issue_number: int) -> bool:
+    async def commit_intent(
+        self, signature: str, intent_id: str, issue_number: int, expected_state: str = "POSTING"
+    ) -> bool:
         record = self._intents.get(signature)
-        if record:
+        if record and record["intent_id"] == intent_id and record["state"] == expected_state:
             record["state"] = IntentState.COMMITTED.value
             record["issue_number"] = issue_number
             record["updated_at"] = time.time()
@@ -97,7 +101,7 @@ class InMemoryIssueWriteJournal:
 
     async def abort_intent(self, signature: str, intent_id: str) -> bool:
         record = self._intents.get(signature)
-        if record and record["intent_id"] == intent_id:
+        if record and record["intent_id"] == intent_id and record["state"] == IntentState.PREPARED.value:
             record["state"] = IntentState.ABORTED.value
             record["updated_at"] = time.time()
             return True
@@ -153,15 +157,26 @@ class SQLiteIssueWriteJournal:
                 await db.rollback()
                 raise ValueError("Reservation finding_id mismatch")
 
+            if not secrets.compare_digest(dedup_row["reservation_token"] or "", reservation_token or ""):
+                await db.rollback()
+                raise ValueError("Reservation token mismatch")
+
             if dedup_row["state"] == DedupState.RESERVED.value:
                 if dedup_row["lease_expires_at"] <= now:
                     await db.rollback()
                     raise ValueError("Reservation has expired")
                 # Atomically transition to WRITE_PENDING
-                await db.execute(
-                    "UPDATE dedup_reservations SET state = 'WRITE_PENDING', updated_at = ? WHERE signature = ?;",
-                    (now, signature),
+                cursor = await db.execute(
+                    """
+                    UPDATE dedup_reservations
+                    SET state = 'WRITE_PENDING', updated_at = ?
+                    WHERE signature = ? AND finding_id = ? AND reservation_token = ? AND state = 'RESERVED' AND lease_expires_at > ?;
+                    """,
+                    (now, signature, str(finding.finding_id), reservation_token, now),
                 )
+                if cursor.rowcount != 1:
+                    await db.rollback()
+                    raise ValueError("Failed to transition dedup reservation to WRITE_PENDING")
             elif dedup_row["state"] != DedupState.WRITE_PENDING.value:
                 await db.rollback()
                 raise ValueError(f"Invalid dedup state for write intent: {dedup_row['state']}")
@@ -239,38 +254,53 @@ class SQLiteIssueWriteJournal:
                 """
                 UPDATE issue_write_intents
                 SET state = 'POSTING', updated_at = ?
-                WHERE signature = ? AND intent_id = ?;
+                WHERE signature = ? AND intent_id = ? AND state = 'PREPARED';
                 """,
                 (now, signature, intent_id),
             )
-            updated = cursor.rowcount > 0
+            updated = cursor.rowcount == 1
             if updated:
                 await db.commit()
             else:
                 await db.rollback()
             return updated
 
-    async def commit_intent(self, signature: str, intent_id: str, issue_number: int) -> bool:
+    async def commit_intent(
+        self, signature: str, intent_id: str, issue_number: int, expected_state: str = "POSTING"
+    ) -> bool:
         await self._ensure_init()
         now = time.time()
         async with await get_db_connection(self.db_path) as db:
             await db.execute("BEGIN IMMEDIATE;")
-            await db.execute(
+            cursor = await db.execute(
                 """
                 UPDATE issue_write_intents
                 SET state = 'COMMITTED', issue_number = ?, updated_at = ?
-                WHERE signature = ?;
+                WHERE signature = ? AND intent_id = ? AND state = ?;
                 """,
-                (issue_number, now, signature),
+                (issue_number, now, signature, intent_id, expected_state),
             )
-            await db.execute(
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+
+            dedup_cursor = await db.execute(
                 """
                 UPDATE dedup_reservations
                 SET state = 'COMMITTED', issue_number = ?, updated_at = ?
-                WHERE signature = ?;
+                WHERE signature = ? AND state = 'WRITE_PENDING';
                 """,
                 (issue_number, now, signature),
             )
+            if dedup_cursor.rowcount != 1:
+                async with db.execute(
+                    "SELECT state, issue_number FROM dedup_reservations WHERE signature = ?;", (signature,)
+                ) as d_cur:
+                    d_row = await d_cur.fetchone()
+                    if not d_row or d_row["state"] != DedupState.COMMITTED.value or d_row["issue_number"] != issue_number:
+                        await db.rollback()
+                        return False
+
             await db.commit()
             return True
 
@@ -279,19 +309,24 @@ class SQLiteIssueWriteJournal:
         now = time.time()
         async with await get_db_connection(self.db_path) as db:
             await db.execute("BEGIN IMMEDIATE;")
-            await db.execute(
+            cursor = await db.execute(
                 """
                 UPDATE issue_write_intents
                 SET state = 'ABORTED', updated_at = ?
-                WHERE signature = ? AND intent_id = ?;
+                WHERE signature = ? AND intent_id = ? AND state = 'PREPARED';
                 """,
                 (now, signature, intent_id),
             )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+
+            # Only revert dedup if it is currently WRITE_PENDING. Never revert COMMITTED!
             await db.execute(
                 """
                 UPDATE dedup_reservations
                 SET state = 'RESERVED', updated_at = ?
-                WHERE signature = ?;
+                WHERE signature = ? AND state = 'WRITE_PENDING';
                 """,
                 (now, signature),
             )

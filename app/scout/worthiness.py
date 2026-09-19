@@ -205,5 +205,7 @@ def materialize_finding(draft: ScoutFindingDraft, event: GitHubPushEvent) -> Fin
         expected_behavior=draft.expected_behavior,
         evidence=evidence_items,
         confidence=draft.confidence,
+        claim_scope=getattr(draft, "claim_scope", "local"),
+        depends_on_absence=getattr(draft, "depends_on_absence", False),
         status=FindingStatus.DISCOVERED,
     )

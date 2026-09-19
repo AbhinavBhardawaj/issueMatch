@@ -298,123 +298,67 @@ async def create_issue_if_authorized(
         raise Unauthorized("Dedup reservation expired or was invalidated immediately before POST")
 
     # 10. Transition intent state from PREPARED to POSTING
-    await journal.transition_to_posting(signature, intent_id)
+    if not await journal.transition_to_posting(signature, intent_id):
+        raise IssueCreationError("Failed to transition intent to POSTING: concurrent write in progress")
 
     body = _format_issue_body(finding, verification, signature=signature)
     sanitized_body = _sanitize_mentions(body)
 
-    retries = 0
-    max_retries = 2
+    # Remote POST attempt with pre-write 429 rate limit backoff.
+    # Ambiguous errors (5xx, timeouts, network failures) must NEVER be re-POSTed blindly.
+    rate_limit_retried = False
+    last_ambiguous_exc = None
 
     while True:
         try:
             issue = await github_client.create_issue(
                 owner, repo_name, finding.title, sanitized_body, ["bug", finding.severity]
             )
-            await journal.commit_intent(signature, intent_id, issue["number"])
+            await journal.commit_intent(signature, intent_id, issue["number"], expected_state="POSTING")
             await dedup_store.commit_reservation(signature, str(finding.finding_id), issue["number"])
             return IssueCreationResult(
                 issue_number=issue["number"],
                 was_existing=False,
                 finding_id=str(finding.finding_id),
             )
-        except (GitHubAmbiguousWriteError, GitHubRequestTimeoutError, TimeoutError) as exc:
-            # Remote issue write status is ambiguous: reconcile immediately
-            existing = await reconcile_existing_issue(
-                finding, verification, github_client, owner, repo_name, signature=signature
-            )
-            if existing:
-                await journal.commit_intent(signature, intent_id, existing["number"])
-                await dedup_store.commit_reservation(signature, str(finding.finding_id), existing["number"])
-                return IssueCreationResult(
-                    issue_number=existing["number"],
-                    was_existing=True,
-                    finding_id=str(finding.finding_id),
-                )
-            if retries >= max_retries:
-                raise IssueCreationError(f"Max retries exceeded on ambiguous write timeout: {exc}")
-            retries += 1
-
-            # Before attempting another POST retry: reconcile again
-            existing_before_retry = await reconcile_existing_issue(
-                finding, verification, github_client, owner, repo_name, signature=signature
-            )
-            if existing_before_retry:
-                await journal.commit_intent(signature, intent_id, existing_before_retry["number"])
-                await dedup_store.commit_reservation(signature, str(finding.finding_id), existing_before_retry["number"])
-                return IssueCreationResult(
-                    issue_number=existing_before_retry["number"],
-                    was_existing=True,
-                    finding_id=str(finding.finding_id),
-                )
-        except (GitHubAuthenticationError, Unauthorized) as exc:
-            await journal.abort_intent(signature, intent_id)
-            raise IssueCreationError(f"GitHub authentication error: {exc}")
-        except GitHubRateLimitError as exc:
-            if retries >= 1:
-                raise IssueCreationError(f"GitHub rate limit exceeded: {exc}")
-            retry_after = getattr(exc, "retry_after", 1)
-            await asyncio.sleep(min(retry_after, 5))
-            retries += 1
-        except GitHubServerError as exc:
-            if retries >= max_retries:
-                raise IssueCreationError(f"Max retries exceeded on GitHub server error: {exc}")
-            retries += 1
-        except GitHubClientError as exc:
-            status_code = getattr(exc, "status_code", 400)
-            if status_code in (401, 403):
-                await journal.abort_intent(signature, intent_id)
-                raise IssueCreationError(f"Authentication error {status_code}: {exc}")
-            elif status_code == 429:
-                if retries >= 1:
-                    raise IssueCreationError("Rate limit exceeded")
-                retry_after = getattr(exc, "retry_after", 1)
-                await asyncio.sleep(min(retry_after, 5))
-                retries += 1
-            elif 400 <= status_code < 500:
-                await journal.abort_intent(signature, intent_id)
-                raise IssueCreationError(f"Client error {status_code}: {exc}")
-            elif status_code >= 500:
-                if retries >= max_retries:
-                    raise IssueCreationError(f"Max retries exceeded on {status_code}: {exc}")
-                retries += 1
-            else:
-                raise IssueCreationError(f"GitHub client error: {exc}")
-        except GitHubAPIError as exc:
-            if exc.status_code in (401, 403):
-                await journal.abort_intent(signature, intent_id)
-                raise IssueCreationError(f"Authentication failure: {exc}")
-            elif exc.status_code == 429:
-                if retries >= 1:
-                    raise IssueCreationError("Rate limit exceeded")
-                await asyncio.sleep(min(exc.retry_after, 5))
-                retries += 1
-            elif 400 <= exc.status_code < 500:
-                await journal.abort_intent(signature, intent_id)
-                raise IssueCreationError(f"Client error {exc.status_code}: {exc}")
-            elif exc.status_code >= 500:
-                if retries >= max_retries:
-                    raise IssueCreationError(f"Max retries exceeded on {exc.status_code}")
-                retries += 1
-            else:
-                raise IssueCreationError(f"API error: {exc}")
-        except Exception as exc:
+        except (GitHubRateLimitError, GitHubAPIError, GitHubClientError) as exc:
             status_code = getattr(exc, "status_code", None)
-            if status_code in (401, 403):
-                await journal.abort_intent(signature, intent_id)
-                raise IssueCreationError(f"Authentication error {status_code}: {exc}")
-            elif status_code == 429:
-                if retries >= 1:
-                    raise IssueCreationError("Rate limit exceeded")
-                retry_after = getattr(exc, "retry_after", 1)
+            if (isinstance(exc, GitHubRateLimitError) or status_code == 429) and not rate_limit_retried:
+                rate_limit_retried = True
+                retry_after = getattr(exc, "retry_after", 0)
                 await asyncio.sleep(min(retry_after, 5))
-                retries += 1
-            elif status_code and 400 <= status_code < 500:
-                await journal.abort_intent(signature, intent_id)
-                raise IssueCreationError(f"Client error {status_code}: {exc}")
-            elif status_code and status_code >= 500:
-                if retries >= max_retries:
-                    raise IssueCreationError(f"Max retries exceeded on {status_code}")
-                retries += 1
-            else:
-                raise IssueCreationError(f"Unexpected error: {exc}")
+                continue
+
+            if status_code and 400 <= status_code < 500 and status_code != 429:
+                # Definite pre-write client rejection: abort PREPARED if possible or fail closed
+                raise IssueCreationError(f"GitHub client error {status_code}: {exc}") from exc
+
+            last_ambiguous_exc = exc
+            break
+        except Exception as exc:
+            last_ambiguous_exc = exc
+            break
+
+    # Remote issue write status is ambiguous: DO NOT call create_issue() again.
+    # Attempt bounded reconciliation to verify if GitHub created the issue despite the error.
+    for attempt in range(3):
+        existing = await reconcile_existing_issue(
+            finding, verification, github_client, owner, repo_name, signature=signature
+        )
+        if existing:
+            await journal.commit_intent(signature, intent_id, existing["number"], expected_state="POSTING")
+            await dedup_store.commit_reservation(signature, str(finding.finding_id), existing["number"])
+            return IssueCreationResult(
+                issue_number=existing["number"],
+                was_existing=True,
+                finding_id=str(finding.finding_id),
+            )
+        if attempt < 2:
+            await asyncio.sleep(0.5)
+
+    # Reconciliation could not determine the result.
+    # Intent remains in POSTING state to prevent blind duplicate creation.
+    raise UnresolvedWriteIntentError(
+        f"Ambiguous GitHub issue POST for signature {signature} (intent {intent_id}): {last_ambiguous_exc}. "
+        "Reconciliation could not verify remote creation; intent remains in POSTING state."
+    ) from last_ambiguous_exc

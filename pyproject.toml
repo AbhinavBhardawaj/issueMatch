@@ -27,3 +27,5 @@ exclude = ["frontend*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-p no:phoenix"
+

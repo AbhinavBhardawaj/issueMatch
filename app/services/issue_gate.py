@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 from app.domain.states import VerificationStatus, EvidenceStatus
-from app.domain.models import Finding, Verification, RepoContext, ExistingIssue
+from app.domain.models import Finding, Verification, RepoContext, ExistingIssue, ContextCompleteness
 from app.domain.normalization import normalize_code, normalize_path
 from app.verifier.evidence import EvidenceValidationResult
 from app.verifier.citation_validator import validate_verifier_citations
@@ -671,6 +671,10 @@ def evaluate_issue_authorization(
 
     if verification.duplicate_issue or check_existing_github_issues(finding, repo_context.existing_issues):
         return GateResult(decision=GateDecision.DENY, reason="EXISTING_GITHUB_ISSUE")
+
+    if repo_context.context_completeness == ContextCompleteness.PARTIAL:
+        if getattr(finding, "claim_scope", "local") == "repository_wide" or getattr(finding, "depends_on_absence", False):
+            return GateResult(decision=GateDecision.DENY, reason="PARTIAL_CONTEXT_GLOBAL_ABSENCE")
 
     finding_category = (getattr(finding, "category", "") or getattr(finding, "severity", "")).lower()
     if finding_category == "security":

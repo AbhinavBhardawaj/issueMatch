@@ -32,6 +32,8 @@ class Finding(BaseModel):
     expected_behavior: str
     evidence: list[EvidenceItem] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
+    claim_scope: str = "local"
+    depends_on_absence: bool = False
     status: FindingStatus = FindingStatus.DISCOVERED
     created_at: str = ""
 

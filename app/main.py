@@ -29,6 +29,7 @@ from app.scout.agent import ScoutAgent
 from app.scout.service import ScoutService
 from app.infrastructure.llm_router import (
     MultiLLMProvider,
+    ProviderConfigurationError,
     create_scout_provider,
     create_verifier_provider,
 )
@@ -81,15 +82,27 @@ def build_scout_service(
     client_factory: Callable[[int], Any] | None = None,
 ) -> ScoutService:
     """Builds a new ScoutService instance bound to the provided application stores."""
-    try:
+    # Scout LLM: Fail closed if explicitly configured with invalid settings
+    if os.environ.get("SCOUT_PROVIDER"):
         scout_llm = create_scout_provider()
-    except Exception:
-        scout_llm = MultiLLMProvider([])
+    else:
+        try:
+            scout_llm = create_scout_provider()
+        except ProviderConfigurationError:
+            raise
+        except Exception:
+            scout_llm = MultiLLMProvider([])
 
-    try:
+    # Verifier LLM: Fail closed if explicitly configured with invalid settings
+    if os.environ.get("VERIFIER_PROVIDER"):
         verifier_llm = create_verifier_provider()
-    except Exception:
-        verifier_llm = MultiLLMProvider([])
+    else:
+        try:
+            verifier_llm = create_verifier_provider()
+        except ProviderConfigurationError:
+            raise
+        except Exception:
+            verifier_llm = MultiLLMProvider([])
 
     scout_agent = ScoutAgent(llm_provider=scout_llm)
     resolved_client_factory = client_factory or get_lazy_installation_client_factory()
@@ -118,9 +131,14 @@ def create_application(
     config: AppRuntimeConfig | None = None,
     start_worker: bool = False,
 ) -> FastAPI:
-    resolved_config = config or AppRuntimeConfig.from_environment(auto_start_worker=start_worker)
+    if config is not None:
+        resolved_config = config
+        if start_worker:
+            resolved_config.auto_start_worker = True
+    else:
+        resolved_config = AppRuntimeConfig.from_environment(auto_start_worker=start_worker)
 
-    use_sqlite = start_worker or bool(os.environ.get("ISSUE_ANALYZER_DB_PATH"))
+    use_sqlite = resolved_config.auto_start_worker or bool(os.environ.get("ISSUE_ANALYZER_DB_PATH"))
     # Application-scoped stores (created per application unless injected)
     app_delivery_store = (
         delivery_store
@@ -184,6 +202,7 @@ def create_application(
 
     application = FastAPI(title="IssueMatch", lifespan=lifespan)
 
+    application.state.config = resolved_config
     application.state.delivery_store = app_delivery_store
     application.state.dedup_store = app_dedup_store
     application.state.write_journal = app_write_journal
@@ -203,6 +222,7 @@ def create_application(
         candidate_service=candidate_service,
         delivery_store=app_delivery_store,
         scout_service=app_scout_service,
+        max_attempts=resolved_config.worker_max_attempts,
     )
     for route in webhook_router.routes:
         application.router.routes.append(route)
