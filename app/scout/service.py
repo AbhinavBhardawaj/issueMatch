@@ -170,6 +170,7 @@ class ScoutService:
                     repo_context,
                     event.repository_owner,
                     event.repository_name,
+                    github_write_client=downstream_client,
                 )
                 if res and getattr(res, "issue_number", None):
                     issues_created += 1

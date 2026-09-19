@@ -25,8 +25,8 @@ def verify_signature(raw_body: bytes, signature: str | None, secret: str) -> boo
 
 
 def create_github_webhook_router(
-    webhook_secret: str,
-    candidate_service: CandidateService,
+    webhook_secret: str | Callable[[], str],
+    candidate_service: CandidateService | None = None,
     delivery_store: DeliveryStore | None = None,
     scout_service: Any = None,
 ) -> APIRouter:
@@ -38,7 +38,8 @@ def create_github_webhook_router(
     ) -> dict[str, str]:
         raw_body = await request.body()
         signature = request.headers.get("X-Hub-Signature-256")
-        if not verify_signature(raw_body, signature, webhook_secret):
+        resolved_secret = webhook_secret() if callable(webhook_secret) else webhook_secret
+        if not verify_signature(raw_body, signature, resolved_secret):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
         event_name = request.headers.get("X-GitHub-Event")
@@ -79,9 +80,13 @@ def create_github_webhook_router(
                 # Deleted branch, non-default branch, or all-zero after SHA
                 return {"status": "ignored"}
 
-            if scout_service:
+            active_scout_service = scout_service
+            if active_scout_service is None and hasattr(request.app.state, "scout_service"):
+                active_scout_service = getattr(request.app.state, "scout_service", None)
+
+            if active_scout_service:
                 # Local orchestration via BackgroundTasks (documented as temporary local orchestration)
-                background_tasks.add_task(scout_service.process_push, push_event)
+                background_tasks.add_task(active_scout_service.process_push, push_event)
 
             return {"status": "accepted"}
 
@@ -93,7 +98,11 @@ def create_github_webhook_router(
                 normalized = normalize_issue_comment_created(payload, delivery_id)
             except MalformedGitHubEvent:
                 raise HTTPException(status_code=400, detail="Malformed issue comment event")
-            background_tasks.add_task(candidate_service.process_issue_comment, normalized)
+            active_candidate_service = candidate_service
+            if active_candidate_service is None and hasattr(request.app.state, "candidate_service"):
+                active_candidate_service = getattr(request.app.state, "candidate_service", None)
+            if active_candidate_service:
+                background_tasks.add_task(active_candidate_service.process_issue_comment, normalized)
             return {"status": "accepted"}
 
         # ISSUES EVENT
