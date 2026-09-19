@@ -56,8 +56,8 @@ def test_title_change_same_sig(make_finding):
 # DD5
 def test_different_defect_not_duplicate(make_finding):
     store = InMemoryDedupStore()
-    f1 = make_finding(finding_id="F-1", description="Defect A")
-    f2 = make_finding(finding_id="F-2", description="Defect B")
+    f1 = make_finding(finding_id="F-1", function="func_a", description="Defect A")
+    f2 = make_finding(finding_id="F-2", function="func_b", description="Defect B")
     
     res1 = store.check_and_reserve(f1)
     res2 = store.check_and_reserve(f2)

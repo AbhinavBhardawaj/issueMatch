@@ -119,7 +119,6 @@ async def test_case_1_real_behavioral_bug(base_push_event):
     dedup_store = InMemoryDedupStore()
     pipeline = VerifierPipeline(
         llm_provider=verifier_provider,
-        github_write_client=mock_github_write_client,
         dedup_store=dedup_store,
     )
 
@@ -186,7 +185,6 @@ async def test_case_2_false_positive_rejected_by_verifier(base_push_event):
 
     pipeline = VerifierPipeline(
         llm_provider=verifier_provider,
-        github_write_client=mock_github_write_client,
         dedup_store=InMemoryDedupStore(),
     )
     service = ScoutService(
@@ -241,7 +239,6 @@ async def test_case_3_hallucinated_file(base_push_event):
 
     pipeline = VerifierPipeline(
         llm_provider=verifier_provider,
-        github_write_client=mock_github_write_client,
         dedup_store=InMemoryDedupStore(),
     )
     service = ScoutService(
@@ -460,7 +457,6 @@ async def test_case_7_duplicate_defect_across_runs(base_push_event):
 
     pipeline = VerifierPipeline(
         llm_provider=MockLLMProvider(verifier_json),
-        github_write_client=mock_github_write_client,
         dedup_store=shared_dedup_store,
     )
 
@@ -548,7 +544,6 @@ async def test_case_8_security_bug_held_for_manual_review(base_push_event):
     mock_github_write_client = make_write_client(read_client)
     pipeline = VerifierPipeline(
         llm_provider=MockLLMProvider(verifier_json),
-        github_write_client=mock_github_write_client,
         dedup_store=InMemoryDedupStore(),
     )
 

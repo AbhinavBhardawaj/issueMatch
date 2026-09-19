@@ -418,13 +418,8 @@ def test_attack_10_duplicate_defect_suppressed():
 # ====================================================================
 @pytest.mark.asyncio
 async def test_attack_11_timeout_reconciliation_prevents_duplicate():
-    client = AsyncMock()
-    # First create_issue call raises timeout
-    client.create_issue.side_effect = TimeoutError("Network timeout")
-    # Search finds the issue was actually created
-    client.search_issues.return_value = [
-        {"number": 42, "body": "<!-- opencontrib:signature:mock_sig -->"}
-    ]
+    from app.services.issue_gate import compute_finding_signature
+    from app.github.client import GitHubAmbiguousWriteError
 
     finding = Finding(
         finding_id="F-time",
@@ -439,6 +434,7 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
         evidence=[EvidenceItem(file="calc.py", line=1, snippet="c")],
         confidence=0.9,
     )
+    sig = compute_finding_signature(finding)
     v = Verification(
         verification_id="v1",
         finding_id="F-time",
@@ -450,13 +446,23 @@ async def test_attack_11_timeout_reconciliation_prevents_duplicate():
         confidence=0.9,
     )
     gate = GateResult(decision=GateDecision.ALLOW, reason="ALL_CONDITIONS_MET")
-    dedup = DedupResult(signature="mock_sig", finding_id="F-time", is_duplicate=False, reason="new")
+    dedup = DedupResult(signature=sig, finding_id="F-time", is_duplicate=False, reason="new")
+
+    client = AsyncMock()
+    # Call 1 (pre-write search): []
+    # Call 2 (post-timeout reconciliation search): [issue with signature]
+    client.search_issues.side_effect = [
+        [],
+        [{"number": 42, "body": f"<!-- opencontrib:signature:{sig} -->"}],
+    ]
+    client.get_issues = AsyncMock(return_value=[])
+    client.create_issue.side_effect = GitHubAmbiguousWriteError("Timeout during issue creation POST")
 
     res = await create_issue_if_authorized(gate, dedup, finding, v, client, "org", "repo")
     assert res.issue_number == 42
     assert res.was_existing is True
-    # create_issue was never executed because search found existing marker
-    client.create_issue.assert_not_called()
+    # Exactly one create_issue attempt occurred, then ambiguous timeout was caught and reconciled
+    assert client.create_issue.call_count == 1
 
 
 # ====================================================================

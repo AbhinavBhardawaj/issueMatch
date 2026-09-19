@@ -120,18 +120,20 @@ def test_ic5_429_retry_after(make_finding, make_verification, make_dedup_result,
     assert len(fake_client.issues_created) == 1
 
 def test_ic6_timeout_reconciliation(make_finding, make_verification, make_dedup_result, make_gate_result):
+    from app.github.client import GitHubAmbiguousWriteError
+
     finding = make_finding()
     verification = make_verification(finding)
     gate_result = make_gate_result()
     dedup_result = make_dedup_result(finding)
     
-    marker = f"<!-- opencontrib:finding:{finding.finding_id}:v:{verification.verification_id} -->"
+    sig_marker = f"<!-- opencontrib:signature:{dedup_result.signature} -->"
     
     class DynamicFakeClient(FakeGitHubClient):
         async def create_issue(self, owner, repo, title, body, labels=None):
             self.create_call_count += 1
-            self.search_results.append({"number": 100, "body": marker})
-            raise TimeoutError("Simulated timeout")
+            self.search_results.append({"number": 100, "body": sig_marker})
+            raise GitHubAmbiguousWriteError("Timeout during issue creation POST")
             
     client = DynamicFakeClient()
     

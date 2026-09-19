@@ -16,16 +16,9 @@ class VerifierPipeline:
         self,
         llm_provider: LLMProvider,
         dedup_store: InMemoryDedupStore | None = None,
-        github_write_client: IssueWriteClient | None = None,
     ):
         self.llm_provider = llm_provider
-        if dedup_store is not None and not isinstance(dedup_store, InMemoryDedupStore):
-            # Backward compatibility if a caller passed VerifierPipeline(llm, client)
-            self.github_write_client = dedup_store
-            self.dedup_store = InMemoryDedupStore()
-        else:
-            self.dedup_store = dedup_store or InMemoryDedupStore()
-            self.github_write_client = github_write_client
+        self.dedup_store = dedup_store or InMemoryDedupStore()
 
     async def run(
         self,
@@ -33,11 +26,9 @@ class VerifierPipeline:
         repo_context: RepoContext,
         owner: str,
         repo_name: str,
-        github_write_client: IssueWriteClient | None = None,
+        *,
+        github_write_client: IssueWriteClient,
     ):
-        write_client = github_write_client or self.github_write_client
-        if write_client is None:
-            raise ValueError("github_write_client must be provided to run VerifierPipeline")
 
         # 0. Initial transition: DISCOVERED -> VERIFYING
         if finding.status == FindingStatus.DISCOVERED:
@@ -89,9 +80,11 @@ class VerifierPipeline:
             dedup_result,
             finding,
             verification,
-            write_client,
+            github_write_client,
             owner,
-            repo_name
+            repo_name,
+            evidence_result=evidence_result,
+            repo_context=repo_context,
         )
 
         finding = transition_finding(finding, FindingStatus.ISSUE_CREATED)
