@@ -7,7 +7,6 @@ IssueMatch integrates two core capabilities:
 The application is assembled with `app.main.create_production_app()` for production or `app.main.create_app(webhook_secret, candidate_service)` / `app.main.create_application(...)` for tests.
 
 Production wiring supplies:
-
 * a persistent `CandidateRepository` (DynamoDB or in-memory)
 * an installation-scoped GitHub client factory
 * Developer B's implementation of `AnalysisService`
