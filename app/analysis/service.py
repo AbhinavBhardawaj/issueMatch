@@ -9,7 +9,7 @@ from app.models.context import RepositoryAnalysisContext
 
 from .criteria import check_acceptance_criteria
 from .provider import AnalysisProvider, AnalysisProviderResult
-from .verifier import derive_issue_grounded_evidence, normalize_evidence_path, verify_evidence
+from .verifier import derive_issue_grounded_evidence, resolve_evidence_path, verify_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -108,15 +108,13 @@ class DefaultAnalysisService:
         base_prompt = self._build_prompt(candidate, context)
         supplied_paths = {file.path for file in (*context.code_context.file_contents,
                                                  *context.code_context.test_files)}
-        provider_result = AnalysisProviderResult.model_validate(
-            await self._provider.generate(base_prompt)
-        )
+        provider_result = self._provider_result(await self._provider.generate(base_prompt))
         reason_retry_used = False
         citation_retry_used = False
         while True:
             verified_evidence = verify_evidence(provider_result.evidence, context)
             absent_citations = [item.path for item in provider_result.evidence
-                                if normalize_evidence_path(item.path, context) not in supplied_paths]
+                                if resolve_evidence_path(item, context) not in supplied_paths]
             missing_revision = (provider_result.decision is AnalysisDecision.REVISION_REQUIRED
                                 and not (provider_result.revision_feedback.strip()
                                          or any(item.strip() for item in provider_result.issues)
@@ -126,7 +124,7 @@ class DefaultAnalysisService:
                                           or provider_result.recommendation.strip()))
             invalid_pass_citation = (provider_result.decision is AnalysisDecision.PASS
                                      and bool(provider_result.evidence)
-                                     and (bool(absent_citations) or not verified_evidence))
+                                     and not verified_evidence)
             if (missing_revision or missing_rejection) and not reason_retry_used:
                 reason_retry_used = True
                 correction = (
@@ -147,9 +145,7 @@ class DefaultAnalysisService:
                 )
             else:
                 break
-            provider_result = AnalysisProviderResult.model_validate(
-                await self._provider.generate(base_prompt + correction)
-            )
+            provider_result = self._provider_result(await self._provider.generate(base_prompt + correction))
         result = provider_result.model_dump()
 
         repo_identifiers = {
@@ -157,6 +153,9 @@ class DefaultAnalysisService:
             f"{context.repository_context.owner}/{context.repository_context.name}",
         }
         invented_citations = [path for path in absent_citations if path not in repo_identifiers]
+        if absent_citations:
+            logger.warning("Analysis cited paths outside supplied code: candidate=%s count=%s verified=%s",
+                           candidate.candidate_id, len(absent_citations), len(verified_evidence))
 
         # A tiny local model can contradict a complete, explicitly checked
         # proposal with zero confidence, a reasonless rejection, or a bogus
@@ -169,12 +168,11 @@ class DefaultAnalysisService:
              and not provider_result.issues and not provider_result.missing_requirements)
         ))
         invalid_pass_citation = (provider_result.decision is AnalysisDecision.PASS
-                                 and (bool(absent_citations)
-                                      or (bool(provider_result.evidence) and not verified_evidence)))
+                                 and bool(provider_result.evidence) and not verified_evidence)
         if (coverage and not coverage.missing
                 and (inconclusive_zero or invalid_rejection or invalid_pass_citation)):
             if provider_result.evidence and (absent_citations or not verified_evidence):
-                if invented_citations and not any(item.path in supplied_paths for item in provider_result.evidence):
+                if invented_citations and not verified_evidence:
                     raise ValueError("Provider cited a repository file absent from supplied context")
                 logger.warning("Discarding unverified inconclusive citations: candidate=%s",
                                candidate.candidate_id)
@@ -200,11 +198,15 @@ class DefaultAnalysisService:
             raise ValueError("Provider revision lacked actionable feedback")
 
         if provider_result.decision is AnalysisDecision.PASS:
-            if absent_citations:
+            # Keep verified source excerpts even if the model also invented an
+            # additional path. Never show or trust the invented citation.
+            if absent_citations and verified_evidence:
+                logger.info("Retained verified PASS citations: candidate=%s count=%s",
+                            candidate.candidate_id, len(verified_evidence))
+            elif absent_citations and not verified_evidence:
                 if invented_citations:
                     raise ValueError("Provider PASS cited a repository file absent from supplied context")
-                if not verified_evidence:
-                    verified_evidence = derive_issue_grounded_evidence(candidate, context)
+                verified_evidence = derive_issue_grounded_evidence(candidate, context)
             if provider_result.confidence <= 0:
                 raise ValueError("Provider PASS had zero confidence")
             if provider_result.evidence and not verified_evidence:
@@ -225,6 +227,15 @@ class DefaultAnalysisService:
                 result["revision_feedback"] = " ".join(details[:3])
 
         return ApproachAnalysis.model_validate(result)
+
+    @staticmethod
+    def _provider_result(raw: object) -> AnalysisProviderResult:
+        """Validate the provider boundary, including legacy JSON-only adapters."""
+        if isinstance(raw, AnalysisProviderResult):
+            return raw
+        if isinstance(raw, str):
+            return AnalysisProviderResult.model_validate_json(raw)
+        return AnalysisProviderResult.model_validate(raw)
 
     def _build_prompt(
         self,

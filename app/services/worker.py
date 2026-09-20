@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Any
 
-from app.candidates.service import CandidateService
+from app.candidates.service import CandidateService, ProcessingOutcome
 from app.github.events import (
     MalformedGitHubEvent,
     normalize_issue_assignment,
@@ -96,12 +96,23 @@ class DurableWebhookWorker:
 
             elif event_type == "issue_comment" and self.candidate_service:
                 comment_event = normalize_issue_comment_created(payload, delivery_id)
-                if (job.get("attempt_count", 1) > 1
-                        and isinstance(self.candidate_service, CandidateService)):
-                    await self.candidate_service.resume_incomplete_issue_comment(comment_event)
+                if isinstance(self.candidate_service, CandidateService):
+                    if job.get("attempt_count", 1) > 1:
+                        result = await self.candidate_service.resume_incomplete_issue_comment(
+                            comment_event, defer_operational_failure=True)
+                    else:
+                        result = await self.candidate_service.process_issue_comment(
+                            comment_event, defer_operational_failure=True)
                 else:
-                    await self.candidate_service.process_issue_comment(comment_event)
-                await self.delivery_store.complete_job(delivery_id, lease_token)
+                    result = await self.candidate_service.process_issue_comment(comment_event)
+                if (isinstance(self.candidate_service, CandidateService)
+                        and result.outcome is ProcessingOutcome.FAILED and result.retryable):
+                    recorded = await self.delivery_store.fail_job(
+                        delivery_id, lease_token, error_msg=result.detail, retryable=True)
+                    if (recorded and job.get("attempt_count", 1) >= job.get("max_attempts", 3)):
+                        await self.candidate_service.finalize_failed_issue_comment(comment_event)
+                else:
+                    await self.delivery_store.complete_job(delivery_id, lease_token)
 
             elif event_type == "issues" and self.candidate_service:
                 assignment_event = normalize_issue_assignment(payload, delivery_id)

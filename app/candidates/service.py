@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from inspect import isawaitable
 import logging
+import asyncio
 
 from app.candidates.extractor import CandidateKind, extract_candidate
 from app.candidates.repository import CandidateRepository
@@ -32,6 +33,13 @@ _SAFE_ANALYSIS_FAILURES = {
 }
 
 
+def _is_transient_analysis_failure(exc: Exception) -> bool:
+    """Only infrastructure failures should be retried by the durable worker."""
+    if isinstance(exc, (ValueError, TypeError, KeyError)):
+        return False
+    return isinstance(exc, (OSError, ConnectionError, TimeoutError, asyncio.TimeoutError, RuntimeError))
+
+
 class ProcessingOutcome(str, Enum):
     IGNORED = "IGNORED"
     DUPLICATE = "DUPLICATE"
@@ -47,6 +55,7 @@ class CandidateProcessingResult:
     candidate: CandidateSubmission | None = None
     analysis: ApproachAnalysis | None = None
     detail: str = ""
+    retryable: bool = False
 
 
 class CandidateService:
@@ -60,7 +69,8 @@ class CandidateService:
         self._analysis = analysis_service
         self._analysis_response_poster = analysis_response_poster
 
-    async def process_issue_comment(self, event: GitHubIssueCommentEvent) -> CandidateProcessingResult:
+    async def process_issue_comment(self, event: GitHubIssueCommentEvent,
+                                    *, defer_operational_failure: bool = False) -> CandidateProcessingResult:
         """Process one comment; claim-only comments never invoke analysis."""
         if await self._repository.has_delivery(event.delivery_id):
             logger.info("Duplicate webhook ignored: delivery=%s", event.delivery_id)
@@ -110,9 +120,12 @@ class CandidateService:
         if selected:
             logger.info("Candidate skipped while another candidate is selected: candidate=%s", candidate.candidate_id)
             return CandidateProcessingResult(ProcessingOutcome.WAITING, candidate=candidate, detail="another candidate is recommended or assigned")
-        return await self._evaluate_candidate(candidate, event.installation_id, event.repository_default_branch)
+        return await self._evaluate_candidate(candidate, event.installation_id,
+                                              event.repository_default_branch,
+                                              defer_operational_failure=defer_operational_failure)
 
-    async def resume_incomplete_issue_comment(self, event: GitHubIssueCommentEvent) -> CandidateProcessingResult:
+    async def resume_incomplete_issue_comment(self, event: GitHubIssueCommentEvent,
+                                              *, defer_operational_failure: bool = False) -> CandidateProcessingResult:
         """Resume only a queued retry of the *same* partially saved delivery.
 
         Ordinary GitHub redeliveries still use process_issue_comment and are
@@ -122,7 +135,8 @@ class CandidateService:
         """
         candidate = await self._repository.get_for_delivery(event.delivery_id)
         if candidate is None:
-            return await self.process_issue_comment(event)
+            return await self.process_issue_comment(event,
+                                                    defer_operational_failure=defer_operational_failure)
         if (candidate.comment_id != event.comment_id
                 or candidate.repository_owner != event.repository_owner
                 or candidate.repository_name != event.repository_name
@@ -131,6 +145,7 @@ class CandidateService:
         if candidate.status not in {
             CandidateStatus.APPROACH_SUBMITTED, CandidateStatus.ANALYZING,
             CandidateStatus.CONTEXT_PENDING, CandidateStatus.ANALYSIS_PENDING,
+            CandidateStatus.FAILED,
         }:
             logger.info("Completed or ineligible candidate retry ignored: candidate=%s status=%s",
                         candidate.candidate_id, candidate.status.value)
@@ -147,7 +162,24 @@ class CandidateService:
                 }))
         logger.info("Resuming incomplete candidate delivery: candidate=%s", candidate.candidate_id)
         return await self._evaluate_candidate(candidate, event.installation_id,
-                                              event.repository_default_branch)
+                                              event.repository_default_branch,
+                                              defer_operational_failure=defer_operational_failure)
+
+    async def finalize_failed_issue_comment(self, event: GitHubIssueCommentEvent) -> None:
+        """Notify once only after the durable worker exhausts all attempts."""
+        candidate = await self._repository.get_for_delivery(event.delivery_id)
+        if candidate is None or candidate.status not in {
+            CandidateStatus.ANALYZING, CandidateStatus.CONTEXT_PENDING,
+            CandidateStatus.ANALYSIS_PENDING, CandidateStatus.FAILED,
+        }:
+            return
+        try:
+            failed = await self._repository.update_status(candidate.candidate_id, CandidateStatus.FAILED)
+            client = await self._make_client(event.installation_id)
+            await post_analysis_unavailable(client, failed)
+        except Exception as exc:
+            logger.error("Final analysis-unavailable notice failed: candidate=%s failure_type=%s",
+                         candidate.candidate_id, type(exc).__name__)
 
     async def process_issue_assignment(self, event: GitHubIssueAssignmentEvent) -> CandidateProcessingResult:
         """Track assignment changes and resume ordered evaluation after unassignment."""
@@ -192,15 +224,19 @@ class CandidateService:
         logger.info("Unassignment detected; resuming candidate evaluation: issue=%s/%s#%s", event.repository_owner, event.repository_name, event.issue_number)
         return await self._evaluate_next_pending(event)
 
-    async def _evaluate_candidate(self, candidate: CandidateSubmission, installation_id: int | None, default_branch: str) -> CandidateProcessingResult:
+    async def _evaluate_candidate(self, candidate: CandidateSubmission, installation_id: int | None,
+                                  default_branch: str, *, defer_operational_failure: bool = False) -> CandidateProcessingResult:
         candidate = await self._repository.update(candidate.model_copy(update={"status": CandidateStatus.ANALYZING}))
         try:
             client = await self._make_client(installation_id)
             context = await self._collect_context(client, candidate, default_branch)
         except Exception as exc:
             logger.error("Candidate context collection failed: candidate=%s failure_type=%s", candidate.candidate_id, type(exc).__name__)
-            failed = await self._repository.update_status(candidate.candidate_id, CandidateStatus.FAILED)
-            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed, detail=f"context collection failed ({type(exc).__name__})")
+            status = CandidateStatus.CONTEXT_PENDING if defer_operational_failure else CandidateStatus.FAILED
+            failed = await self._repository.update_status(candidate.candidate_id, status)
+            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed,
+                                             detail=f"context collection failed ({type(exc).__name__})",
+                                             retryable=defer_operational_failure)
         if self._analysis is None:
             pending = await self._repository.update_status(candidate.candidate_id, CandidateStatus.ANALYSIS_PENDING)
             return CandidateProcessingResult(ProcessingOutcome.ANALYSIS_PENDING, candidate=pending, detail="analysis service not configured")
@@ -221,13 +257,18 @@ class CandidateService:
                 failure_reason = f"{schema}/{fields}"
             logger.error("Analysis service failed: candidate=%s failure_type=%s reason=%s",
                          candidate.candidate_id, type(exc).__name__, failure_reason)
-            failed = await self._repository.update_status(candidate.candidate_id, CandidateStatus.FAILED)
-            try:
-                await post_analysis_unavailable(client, failed)
-            except Exception as posting_exc:
-                logger.error("Analysis-unavailable notice failed: candidate=%s failure_type=%s",
-                             candidate.candidate_id, type(posting_exc).__name__)
-            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed, detail=f"analysis service failed ({type(exc).__name__})")
+            retryable = defer_operational_failure and _is_transient_analysis_failure(exc)
+            status = CandidateStatus.ANALYSIS_PENDING if retryable else CandidateStatus.FAILED
+            failed = await self._repository.update_status(candidate.candidate_id, status)
+            if not retryable:
+                try:
+                    await post_analysis_unavailable(client, failed)
+                except Exception as posting_exc:
+                    logger.error("Analysis-unavailable notice failed: candidate=%s failure_type=%s",
+                                 candidate.candidate_id, type(posting_exc).__name__)
+            return CandidateProcessingResult(ProcessingOutcome.FAILED, candidate=failed,
+                                             detail=f"analysis service failed ({type(exc).__name__})",
+                                             retryable=retryable)
 
         status = {
             AnalysisDecision.PASS: CandidateStatus.ACCEPTED,

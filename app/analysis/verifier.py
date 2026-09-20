@@ -17,6 +17,25 @@ def normalize_evidence_path(path: str, context: RepositoryAnalysisContext) -> st
     return value
 
 
+def resolve_evidence_path(item: EvidenceCitation, context: RepositoryAnalysisContext) -> str | None:
+    """Resolve an exact path or a unique same-basename file with an exact excerpt."""
+    raw_path = item.path.strip()
+    if raw_path.startswith("/") or ".." in raw_path.split("/"):
+        return None
+    files = {file.path: file for file in (*context.code_context.file_contents,
+                                         *context.code_context.test_files)}
+    path = normalize_evidence_path(raw_path, context)
+    if path in files:
+        return path
+    basename = path.rsplit("/", 1)[-1]
+    excerpt = item.excerpt.strip()
+    if not excerpt:
+        return None
+    matches = [file.path for file in files.values()
+               if file.path.rsplit("/", 1)[-1] == basename and excerpt in file.content]
+    return matches[0] if len(matches) == 1 else None
+
+
 def verify_evidence(evidence: list[EvidenceCitation], context: RepositoryAnalysisContext) -> list[str]:
     """Verify exact excerpts, not the semantic truth of model claims.
 
@@ -26,7 +45,8 @@ def verify_evidence(evidence: list[EvidenceCitation], context: RepositoryAnalysi
     files = {file.path: file for file in (*context.code_context.file_contents, *context.code_context.test_files)}
     verified: list[str] = []
     for item in evidence:
-        file = files.get(normalize_evidence_path(item.path, context))
+        resolved_path = resolve_evidence_path(item, context)
+        file = files.get(resolved_path) if resolved_path else None
         excerpt = item.excerpt.strip()
         claim = item.claim.strip()
         if file is None:

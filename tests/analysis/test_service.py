@@ -76,6 +76,17 @@ async def test_repository_prefixed_citation_is_verified_without_retry():
 
 
 @pytest.mark.asyncio
+async def test_pass_with_one_valid_and_one_stale_citation_keeps_verified_evidence():
+    provider = FakeAnalysisProvider(output(evidence=[
+        EvidenceCitation(path="src/auth/session.py", excerpt="def timeout(): pass", claim="valid"),
+        EvidenceCitation(path="src/missing.py", excerpt="def missing(): pass", claim="stale"),
+    ]))
+    analysis = await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert analysis.decision is AnalysisDecision.PASS
+    assert analysis.evidence == ["src/auth/session.py:L1 (source excerpt verified)"]
+
+
+@pytest.mark.asyncio
 async def test_inexact_citation_gets_one_bounded_repair_attempt():
     class RepairingProvider:
         def __init__(self):

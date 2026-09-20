@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.analysis.nvidia_provider import NvidiaAnalysisProvider
+from app.analysis.provider import AnalysisProviderResult
 
 
 @pytest.mark.asyncio
@@ -31,7 +32,9 @@ async def test_nvidia_analysis_provider_success():
         mock_post.return_value = mock_response
         
         res = await provider.generate("test prompt")
-        assert res == '{"decision":"PASS","confidence":0.95}'
+        assert isinstance(res, AnalysisProviderResult)
+        assert res.decision.value == "PASS"
+        assert res.confidence == 0.95
         mock_post.assert_called_once()
 
 
