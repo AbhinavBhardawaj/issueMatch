@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 import time
@@ -38,17 +39,38 @@ class ScoutAgent:
         try:
             raw_response = await self.llm_provider.complete(SYSTEM_PROMPT, user_prompt)
         except Exception as exc:
-            raise MalformedScoutResponse(f"Scout LLM invocation failed: {str(exc)}") from exc
+            err_msg = str(exc) or type(exc).__name__
+            raise MalformedScoutResponse(f"Scout LLM invocation failed: {err_msg}") from exc
         latency_ms = round((time.perf_counter() - t0) * 1000, 2)
 
         # Strip markdown fences if present
         cleaned = raw_response.strip()
-        match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL)
         if match:
             cleaned = match.group(1).strip()
 
         try:
-            response = ScoutResponse.model_validate_json(cleaned)
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
+                cleaned_findings = []
+                for f in parsed["findings"]:
+                    if isinstance(f, dict):
+                        f_copy = dict(f)
+                        if not f_copy.get("file"):
+                            f_copy["file"] = f_copy.get("file_path") or f_copy.get("path")
+                            if not f_copy.get("file") and f_copy.get("evidence"):
+                                first_ev = f_copy["evidence"][0]
+                                if isinstance(first_ev, dict):
+                                    f_copy["file"] = first_ev.get("file")
+                        if isinstance(f_copy.get("severity"), str):
+                            f_copy["severity"] = f_copy["severity"].lower()
+                        elif not f_copy.get("severity"):
+                            f_copy["severity"] = "medium"
+                        cleaned_findings.append(f_copy)
+                    else:
+                        cleaned_findings.append(f)
+                parsed = {"findings": cleaned_findings}
+            response = ScoutResponse.model_validate(parsed)
         except ValidationError as exc:
             raise MalformedScoutResponse(f"Scout response failed schema validation: {str(exc)}") from exc
         except Exception as exc:

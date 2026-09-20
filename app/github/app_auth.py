@@ -22,6 +22,11 @@ class GitHubAppConfig:
         app_id = os.getenv("GITHUB_APP_ID")
         private_key = os.getenv("GITHUB_PRIVATE_KEY")
         secret = os.getenv("GITHUB_WEBHOOK_SECRET")
+        if not private_key:
+            pk_path = os.getenv("GITHUB_PRIVATE_KEY_PATH")
+            if pk_path and os.path.exists(pk_path):
+                with open(pk_path, "r", encoding="utf-8") as f:
+                    private_key = f.read()
         missing = [name for name, value in (("GITHUB_APP_ID", app_id), ("GITHUB_PRIVATE_KEY", private_key), ("GITHUB_WEBHOOK_SECRET", secret)) if not value]
         if missing:
             raise GitHubConfigurationError(f"Missing required GitHub App configuration: {', '.join(missing)}")

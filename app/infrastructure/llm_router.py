@@ -111,10 +111,11 @@ class CohereProvider:
             return data["message"]["content"][0]["text"]
 
 class NvidiaNimProvider:
-    def __init__(self, api_key: str, model: str | None = None, timeout: float = 20.0):
+    def __init__(self, api_key: str, model: str | None = None, timeout: float | None = None):
         self.api_key = api_key
         self.model = model or os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b")
-        self.timeout = timeout
+        env_timeout = os.environ.get("LLM_TIMEOUT_SECONDS")
+        self.timeout = timeout if timeout is not None else (float(env_timeout) if env_timeout else 90.0)
         
     async def complete(self, system: str, user: str) -> str:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -191,8 +192,8 @@ def create_role_provider(
     resolved_provider = provider_name or os.environ.get(f"{role_upper}_PROVIDER")
     resolved_model = model_id or os.environ.get(f"{role_upper}_MODEL_ID")
 
-    role_timeout_env = os.environ.get(f"{role_upper}_TIMEOUT")
-    role_timeout = timeout if timeout is not None else (float(role_timeout_env) if role_timeout_env else None)
+    role_timeout_env = os.environ.get(f"{role_upper}_TIMEOUT") or os.environ.get("LLM_TIMEOUT_SECONDS")
+    role_timeout = timeout if timeout is not None else (float(role_timeout_env) if role_timeout_env else 90.0)
 
     if resolved_provider:
         prov_key = resolved_provider.upper().replace("-", "_")

@@ -27,8 +27,11 @@ import logging
 import uvicorn
 from fastapi import Request
 
-# Ensure project root is in sys.path
+from dotenv import load_dotenv
+
+# Ensure project root is in sys.path and load .env if present
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+load_dotenv()
 
 from app.main import create_application, AppRuntimeConfig
 

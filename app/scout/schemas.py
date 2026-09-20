@@ -1,5 +1,5 @@
-from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal, Any
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ScoutEvidenceDraft(BaseModel):
