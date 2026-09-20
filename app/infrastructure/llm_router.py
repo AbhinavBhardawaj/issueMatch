@@ -19,10 +19,19 @@ from typing import List
 from app.verifier.agent import LLMProvider
 from app.verifier.schemas import LLMInvocationError
 
+DEFAULT_PROVIDER_MODELS = {
+    "GROQ": "llama-3.3-70b-versatile",
+    "GEMINI": "gemini-1.5-flash",
+    "MISTRAL": "mistral-large-latest",
+    "COHERE": "command-r-plus",
+    "NVIDIA": "meta/llama-3.1-70b-instruct",
+    "NVIDIA_NIM": "meta/llama-3.1-70b-instruct",
+}
+
 class GroqProvider:
     def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
-        self.model = model or "qwen/qwen3.8-27b"
+        self.model = model or os.environ.get("GROQ_MODEL", DEFAULT_PROVIDER_MODELS["GROQ"])
         self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
@@ -46,7 +55,7 @@ class GroqProvider:
 class GeminiProvider:
     def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
-        self.model = model or "gemini-1.5-flash"
+        self.model = model or os.environ.get("GEMINI_MODEL", DEFAULT_PROVIDER_MODELS["GEMINI"])
         self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
@@ -67,7 +76,7 @@ class GeminiProvider:
 class MistralProvider:
     def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
-        self.model = model or "mistral-large-latest"
+        self.model = model or os.environ.get("MISTRAL_MODEL", DEFAULT_PROVIDER_MODELS["MISTRAL"])
         self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
@@ -90,7 +99,7 @@ class MistralProvider:
 class CohereProvider:
     def __init__(self, api_key: str, model: str | None = None, timeout: float = 10.0):
         self.api_key = api_key
-        self.model = model or "command-r-plus"
+        self.model = model or os.environ.get("COHERE_MODEL", DEFAULT_PROVIDER_MODELS["COHERE"])
         self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
@@ -113,7 +122,7 @@ class CohereProvider:
 class NvidiaNimProvider:
     def __init__(self, api_key: str, model: str | None = None, timeout: float = 20.0):
         self.api_key = api_key
-        self.model = model or os.environ.get("NVIDIA_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+        self.model = model or os.environ.get("NVIDIA_MODEL", DEFAULT_PROVIDER_MODELS["NVIDIA"])
         self.timeout = timeout
         
     async def complete(self, system: str, user: str) -> str:
@@ -149,7 +158,7 @@ PROVIDER_CLASSES = {
 
 
 class ProviderConfigurationError(ValueError):
-    """Raised when an explicitly configured provider lacks a required API key."""
+    """Raised when an explicitly configured provider lacks a required API key or is invalid."""
     pass
 
 
@@ -181,6 +190,35 @@ def get_provider_key(provider_name: str, role: str) -> str:
     )
 
 
+def resolve_role_timeout(role: str, explicit_timeout: float | None = None) -> float | None:
+    """
+    Timeout precedence rule:
+    1. explicit function argument
+    2. SCOUT_TIMEOUT / VERIFIER_TIMEOUT
+    3. LLM_TIMEOUT_SECONDS (shared fallback)
+    4. None (defer to provider class default)
+    """
+    if explicit_timeout is not None:
+        return explicit_timeout
+
+    role_upper = role.upper()
+    role_timeout_env = os.environ.get(f"{role_upper}_TIMEOUT", "").strip()
+    if role_timeout_env:
+        try:
+            return float(role_timeout_env)
+        except ValueError:
+            pass
+
+    global_timeout_env = os.environ.get("LLM_TIMEOUT_SECONDS", "").strip()
+    if global_timeout_env:
+        try:
+            return float(global_timeout_env)
+        except ValueError:
+            pass
+
+    return None
+
+
 def create_role_provider(
     role: str,
     provider_name: str | None = None,
@@ -191,14 +229,13 @@ def create_role_provider(
     resolved_provider = provider_name or os.environ.get(f"{role_upper}_PROVIDER")
     resolved_model = model_id or os.environ.get(f"{role_upper}_MODEL_ID")
 
-    role_timeout_env = os.environ.get(f"{role_upper}_TIMEOUT")
-    role_timeout = timeout if timeout is not None else (float(role_timeout_env) if role_timeout_env else None)
+    role_timeout = resolve_role_timeout(role, timeout)
 
     if resolved_provider:
         prov_key = resolved_provider.upper().replace("-", "_")
         cls = PROVIDER_CLASSES.get(prov_key)
         if not cls:
-            raise ValueError(f"Unknown provider '{resolved_provider}' for role '{role}'")
+            raise ProviderConfigurationError(f"Unknown provider '{resolved_provider}' for role '{role}'")
         api_key = get_provider_key(resolved_provider, role)
         kwargs = {"api_key": api_key, "model": resolved_model}
         if role_timeout is not None:
@@ -206,7 +243,7 @@ def create_role_provider(
         return cls(**kwargs)
 
     # Fallback to loading providers independently for this role (never share instances)
-    providers = load_providers()
+    providers = load_providers(timeout=role_timeout)
     return MultiLLMProvider(providers)
 
 
@@ -226,7 +263,7 @@ def create_verifier_provider(
     return create_role_provider("verifier", provider_name, model_id, timeout)
 
 
-def load_providers() -> List[LLMProvider]:
+def load_providers(timeout: float | None = None) -> List[LLMProvider]:
     providers: List[LLMProvider] = []
     
     def add_keys(env_var: str, provider_cls):
@@ -235,7 +272,10 @@ def load_providers() -> List[LLMProvider]:
             for key in keys_str.split(","):
                 key = key.strip()
                 if key:
-                    providers.append(provider_cls(key))
+                    kwargs = {"api_key": key}
+                    if timeout is not None:
+                        kwargs["timeout"] = timeout
+                    providers.append(provider_cls(**kwargs))
                     
     add_keys("GROQ_API_KEYS", GroqProvider)
     add_keys("GEMINI_API_KEYS", GeminiProvider)
