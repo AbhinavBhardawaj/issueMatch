@@ -20,12 +20,30 @@ class GitHubAppConfig:
     @classmethod
     def from_environment(cls) -> "GitHubAppConfig":
         app_id = os.getenv("GITHUB_APP_ID")
-        private_key = os.getenv("GITHUB_PRIVATE_KEY")
+        private_key_raw = os.getenv("GITHUB_PRIVATE_KEY")
         secret = os.getenv("GITHUB_WEBHOOK_SECRET")
-        missing = [name for name, value in (("GITHUB_APP_ID", app_id), ("GITHUB_PRIVATE_KEY", private_key), ("GITHUB_WEBHOOK_SECRET", secret)) if not value]
+        missing = [name for name, value in (("GITHUB_APP_ID", app_id), ("GITHUB_PRIVATE_KEY", private_key_raw), ("GITHUB_WEBHOOK_SECRET", secret)) if not value]
         if missing:
             raise GitHubConfigurationError(f"Missing required GitHub App configuration: {', '.join(missing)}")
-        return cls(app_id=app_id, private_key=private_key.replace("\\n", "\n"), webhook_secret=secret)
+
+        # Dual-support: inline PEM string or file path
+        if "BEGIN" in private_key_raw and "PRIVATE KEY" in private_key_raw:
+            # Inline PEM (possibly with literal \n escapes from env var)
+            private_key = private_key_raw.replace("\\n", "\n")
+        elif os.path.isfile(private_key_raw):
+            # File path to PEM
+            with open(private_key_raw, "r") as f:
+                private_key = f.read()
+            if "BEGIN" not in private_key or "PRIVATE KEY" not in private_key:
+                raise GitHubConfigurationError(
+                    f"GITHUB_PRIVATE_KEY file '{private_key_raw}' does not contain a valid PEM private key"
+                )
+        else:
+            raise GitHubConfigurationError(
+                "GITHUB_PRIVATE_KEY is neither a valid inline PEM string nor an existing file path"
+            )
+
+        return cls(app_id=app_id, private_key=private_key, webhook_secret=secret)
 
 
 class GitHubAppAuthenticator:

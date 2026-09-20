@@ -163,14 +163,14 @@ def create_live_app():
         if not job:
             raise HTTPException(status_code=404, detail=f"Delivery {delivery_id} not found")
         return {
-            "delivery_id": job.delivery_id,
-            "status": job.status.value if hasattr(job.status, "value") else str(job.status),
-            "event_type": job.event_type,
-            "attempts": job.attempts,
-            "max_attempts": job.max_attempts,
-            "last_error": job.last_error,
-            "created_at": str(job.created_at) if hasattr(job, "created_at") else None,
-            "updated_at": str(job.updated_at) if hasattr(job, "updated_at") else None,
+            "delivery_id": job["delivery_id"],
+            "state": job["state"],
+            "event_type": job["event_type"],
+            "attempt_count": job["attempt_count"],
+            "max_attempts": job["max_attempts"],
+            "last_error": job.get("last_error"),
+            "created_at": str(job["created_at"]) if job.get("created_at") else None,
+            "updated_at": str(job["updated_at"]) if job.get("updated_at") else None,
         }
 
     # Middleware to log delivery arrival safely
@@ -197,7 +197,7 @@ def inspect_delivery_cli(db_path: str, delivery_id: str):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            "SELECT delivery_id, event_type, status, attempts, max_attempts, last_error, created_at, updated_at "
+            "SELECT delivery_id, event_type, state, attempt_count, max_attempts, last_error, created_at, updated_at "
             "FROM webhook_jobs WHERE delivery_id = ?",
             (delivery_id,),
         )

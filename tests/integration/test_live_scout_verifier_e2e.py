@@ -180,7 +180,9 @@ async def test_live_scout_and_verifier_pipeline():
             )
 
         if expect_issue_creation:
-            assert len(result.drafts) >= 1, "Expected Scout to produce at least 1 draft finding"
-            assert result.worthiness_evaluated_count >= 1, "Expected at least 1 finding to reach worthiness filter"
-            assert result.verifier_evaluated_count >= 1, "Expected at least 1 finding to reach Verifier evaluation"
+            assert result.ai_drafts >= 1, "Expected Scout to produce at least 1 draft finding"
+            assert result.escalated_findings >= 1, "Expected at least 1 finding to pass worthiness filter"
+            assert (result.escalated_findings - result.verifier_rejected) >= 1, (
+                "Expected at least 1 finding to survive Verifier evaluation"
+            )
             assert result.issues_created >= 1, "Expected at least 1 GitHub issue to be created in sandbox"

@@ -21,11 +21,11 @@ from app.verifier.schemas import LLMInvocationError
 
 DEFAULT_PROVIDER_MODELS = {
     "GROQ": "llama-3.3-70b-versatile",
-    "GEMINI": "gemini-1.5-flash",
+    "GEMINI": "gemini-2.0-flash",
     "MISTRAL": "mistral-large-latest",
     "COHERE": "command-r-plus",
-    "NVIDIA": "meta/llama-3.1-70b-instruct",
-    "NVIDIA_NIM": "meta/llama-3.1-70b-instruct",
+    "NVIDIA": "meta/llama-3.3-70b-instruct",
+    "NVIDIA_NIM": "meta/llama-3.3-70b-instruct",
 }
 
 class GroqProvider:
