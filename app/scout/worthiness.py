@@ -113,17 +113,15 @@ def should_escalate_to_verifier(
     return True, None
 
 
-def rank_and_filter_drafts(
+def validate_and_filter_drafts_for_context(
     drafts: List[ScoutFindingDraft],
     context: ScoutContext,
     threshold: float = 0.70,
 ) -> Tuple[List[ScoutFindingDraft], List[dict]]:
     """
-    Filter drafts and rank survivors by:
-    1. impact (critical > major > meaningful)
-    2. grounding completeness (number of valid evidence items)
-    3. confidence
-    Applies MAX_FINDINGS_PER_FILE = 1 and MAX_ESCALATED_FINDINGS_PER_PUSH = 3.
+    Validates drafts strictly against the visible files in the given ScoutContext.
+    Checks category, actionability, impact, confidence, required fields, and evidence grounding.
+    Does NOT apply push-wide caps so multiple batches can be merged before final ranking.
     """
     survivors: List[ScoutFindingDraft] = []
     suppression_logs: List[dict] = []
@@ -139,6 +137,23 @@ def rank_and_filter_drafts(
                 "reason": reason.value if reason else "UNKNOWN",
             })
 
+    return survivors, suppression_logs
+
+
+def rank_and_cap_push_findings(
+    survivors: List[ScoutFindingDraft],
+    max_escalated: int = MAX_ESCALATED_FINDINGS_PER_PUSH,
+    max_per_file: int = MAX_FINDINGS_PER_FILE,
+) -> Tuple[List[ScoutFindingDraft], List[dict]]:
+    """
+    Global push-level ranking and capping across all batches.
+    Sorts survivors by:
+    1. impact (critical > major > meaningful)
+    2. grounding completeness (number of valid evidence items)
+    3. confidence
+    Applies GLOBAL MAX_FINDINGS_PER_FILE = 1 and MAX_ESCALATED_FINDINGS_PER_PUSH = 3.
+    """
+    suppression_logs: List[dict] = []
     impact_order = {"critical": 3, "major": 2, "meaningful": 1, "minor": 0, "none": -1}
 
     def sort_key(d: ScoutFindingDraft):
@@ -148,12 +163,12 @@ def rank_and_filter_drafts(
             d.confidence,
         )
 
-    survivors.sort(key=sort_key, reverse=True)
+    sorted_survivors = sorted(survivors, key=sort_key, reverse=True)
 
     escalated: List[ScoutFindingDraft] = []
     seen_files = set()
 
-    for draft in survivors:
+    for draft in sorted_survivors:
         if draft.file in seen_files:
             suppression_logs.append({
                 "title": draft.title,
@@ -162,7 +177,7 @@ def rank_and_filter_drafts(
             })
             continue
 
-        if len(escalated) >= MAX_ESCALATED_FINDINGS_PER_PUSH:
+        if len(escalated) >= max_escalated:
             suppression_logs.append({
                 "title": draft.title,
                 "file": draft.file,
@@ -174,6 +189,20 @@ def rank_and_filter_drafts(
         seen_files.add(draft.file)
 
     return escalated, suppression_logs
+
+
+def rank_and_filter_drafts(
+    drafts: List[ScoutFindingDraft],
+    context: ScoutContext,
+    threshold: float = 0.70,
+) -> Tuple[List[ScoutFindingDraft], List[dict]]:
+    """
+    Backward-compatible convenience wrapper performing per-context validation
+    followed by push-wide ranking and capping.
+    """
+    survivors, sup_v = validate_and_filter_drafts_for_context(drafts, context, threshold)
+    escalated, sup_c = rank_and_cap_push_findings(survivors)
+    return escalated, sup_v + sup_c
 
 
 def materialize_finding(draft: ScoutFindingDraft, event: GitHubPushEvent) -> Finding:
