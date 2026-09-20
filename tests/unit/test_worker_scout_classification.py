@@ -66,9 +66,9 @@ async def test_worker_completes_job_on_zero_findings_or_deterministic_rejection(
     scout_service.process_push.return_value = ScoutRunResult(
         repository_id=100,
         commit_sha="b" * 40,
-        drafts_count=0,
-        worthiness_evaluated_count=0,
-        verifier_evaluated_count=0,
+        ai_drafts=0,
+        escalated_findings=0,
+        verifier_rejected=0,
         issues_created=0,
         failures=[],
     )

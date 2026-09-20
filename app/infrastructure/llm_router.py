@@ -20,12 +20,12 @@ from app.verifier.agent import LLMProvider
 from app.verifier.schemas import LLMInvocationError
 
 DEFAULT_PROVIDER_MODELS = {
-    "GROQ": "llama-3.3-70b-versatile",
-    "GEMINI": "gemini-2.0-flash",
+    "GROQ": "qwen/qwen3.6-27b",
+    "GEMINI": "gemini-2.5-flash",
     "MISTRAL": "mistral-large-latest",
-    "COHERE": "command-r-plus",
-    "NVIDIA": "meta/llama-3.3-70b-instruct",
-    "NVIDIA_NIM": "meta/llama-3.3-70b-instruct",
+    "COHERE": "command-a-plus-05-2026",
+    "NVIDIA": "nvidia/nemotron-3-super-120b-a12b",
+    "NVIDIA_NIM": "nvidia/nemotron-3-super-120b-a12b",
 }
 
 class GroqProvider:

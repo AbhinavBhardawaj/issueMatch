@@ -29,7 +29,7 @@ load_dotenv()
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.github.app_auth import GitHubAppConfig, GitHubAppAuthenticator
+from app.github.app_auth import GitHubAppConfig, GitHubAppAuthenticator, GitHubConfigurationError
 from app.infrastructure.llm_router import (
     create_scout_provider,
     create_verifier_provider,
@@ -59,6 +59,8 @@ async def run_diagnostics() -> bool:
         app_config = GitHubAppConfig.from_environment()
         authenticator = GitHubAppAuthenticator(app_config)
         check("GitHub App Configuration", True, f"App ID {app_config.app_id}")
+    except GitHubConfigurationError as exc:
+        check("GitHub App Configuration", False, f"Failed to load: {exc}")
     except Exception as exc:
         check("GitHub App Configuration", False, f"Failed to load: {exc}")
 
@@ -133,7 +135,7 @@ async def run_diagnostics() -> bool:
         if isinstance(scout_prov, MultiLLMProvider) and len(scout_prov.providers) == 0:
             check("Scout LLM Provider", False, "No active providers loaded")
         else:
-            check("Scout LLM Provider", True, f"{type(scout_prov).__name__} initialized")
+            check("Scout LLM Provider", True, "Scout provider configuration constructed")
     except (ProviderConfigurationError, LLMInvocationError, Exception) as exc:
         check("Scout LLM Provider", False, f"Initialization failed: {exc}")
 
@@ -143,7 +145,7 @@ async def run_diagnostics() -> bool:
         if isinstance(verifier_prov, MultiLLMProvider) and len(verifier_prov.providers) == 0:
             check("Verifier LLM Provider", False, "No active providers loaded")
         else:
-            check("Verifier LLM Provider", True, f"{type(verifier_prov).__name__} initialized")
+            check("Verifier LLM Provider", True, "Verifier provider configuration constructed")
     except (ProviderConfigurationError, LLMInvocationError, Exception) as exc:
         check("Verifier LLM Provider", False, f"Initialization failed: {exc}")
 

@@ -27,7 +27,7 @@ import sqlite3
 import argparse
 import logging
 import uvicorn
-from fastapi import Request, HTTPException
+from fastapi import Request
 from dotenv import load_dotenv
 
 # Developer-facing bootstrap: load .env if present (environment variables take precedence)
@@ -37,6 +37,7 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.main import create_application, AppRuntimeConfig
+from app.github.app_auth import GitHubAppConfig, GitHubConfigurationError
 from app.infrastructure.llm_router import (
     create_scout_provider,
     create_verifier_provider,
@@ -57,26 +58,15 @@ def run_preflight_validation(config: AppRuntimeConfig) -> bool:
     """Validates mandatory configuration before launching server. Exits non-zero on failure."""
     errors = []
 
-    # 1. GitHub App Credentials
-    app_id = os.environ.get("GITHUB_APP_ID", "").strip()
-    if not app_id:
-        errors.append("GITHUB_APP_ID is missing or empty")
-    else:
-        try:
-            int(app_id)
-        except ValueError:
-            errors.append(f"GITHUB_APP_ID must be a numeric integer, got '{app_id}'")
-
-    priv_key = os.environ.get("GITHUB_PRIVATE_KEY", "").strip()
-    if not priv_key:
-        errors.append("GITHUB_PRIVATE_KEY is missing or empty")
-    elif not ("BEGIN " in priv_key and " PRIVATE KEY" in priv_key) and not os.path.exists(priv_key):
-        errors.append("GITHUB_PRIVATE_KEY is neither a valid PEM block nor an existing file path")
-
-    # 2. Webhook Secret
-    webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
-    if not webhook_secret:
-        errors.append("GITHUB_WEBHOOK_SECRET is missing or empty (required for HMAC verification)")
+    # 1. GitHub App Credentials & Webhook Secret (Single source of truth)
+    app_id = "unknown"
+    try:
+        app_config = GitHubAppConfig.from_environment()
+        app_id = app_config.app_id
+    except GitHubConfigurationError as exc:
+        errors.append(f"GitHub App configuration invalid: {exc}")
+    except Exception as exc:
+        errors.append(f"GitHub App configuration invalid: {exc}")
 
     # 3. Scout LLM Configuration
     scout_desc = "unconfigured"
@@ -153,25 +143,6 @@ def create_live_app():
         start_worker=True,
     )
 
-    # Diagnostic endpoint to safely inspect delivery job state without secrets
-    @app.get("/admin/jobs/{delivery_id}")
-    async def inspect_job_state(delivery_id: str):
-        delivery_store = getattr(app.state, "delivery_store", None)
-        if not delivery_store or not hasattr(delivery_store, "get_job"):
-            raise HTTPException(status_code=501, detail="Durable delivery store not active")
-        job = await delivery_store.get_job(delivery_id)
-        if not job:
-            raise HTTPException(status_code=404, detail=f"Delivery {delivery_id} not found")
-        return {
-            "delivery_id": job["delivery_id"],
-            "state": job["state"],
-            "event_type": job["event_type"],
-            "attempt_count": job["attempt_count"],
-            "max_attempts": job["max_attempts"],
-            "last_error": job.get("last_error"),
-            "created_at": str(job["created_at"]) if job.get("created_at") else None,
-            "updated_at": str(job["updated_at"]) if job.get("updated_at") else None,
-        }
 
     # Middleware to log delivery arrival safely
     @app.middleware("http")
@@ -193,7 +164,8 @@ def inspect_delivery_cli(db_path: str, delivery_id: str):
     if not os.path.exists(db_path):
         print(f"Database not found at {db_path}")
         sys.exit(1)
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
@@ -208,6 +180,8 @@ def inspect_delivery_cli(db_path: str, delivery_id: str):
         print("=== DELIVERY JOB DETAILS ===")
         for k in row.keys():
             print(f"  {k}: {row[k]}")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

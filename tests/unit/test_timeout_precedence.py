@@ -73,8 +73,10 @@ def test_unknown_provider_raises_provider_configuration_error(monkeypatch):
 
 def test_centralized_default_models():
     """All supported providers have centralized default models."""
-    assert DEFAULT_PROVIDER_MODELS["GROQ"] == "llama-3.3-70b-versatile"
-    assert DEFAULT_PROVIDER_MODELS["GEMINI"] == "gemini-2.0-flash"
+    assert DEFAULT_PROVIDER_MODELS["GROQ"] == "qwen/qwen3.6-27b"
+    assert DEFAULT_PROVIDER_MODELS["GEMINI"] == "gemini-2.5-flash"
     assert DEFAULT_PROVIDER_MODELS["MISTRAL"] == "mistral-large-latest"
-    assert DEFAULT_PROVIDER_MODELS["COHERE"] == "command-r-plus"
-    assert "llama" in DEFAULT_PROVIDER_MODELS["NVIDIA"].lower()
+    assert DEFAULT_PROVIDER_MODELS["COHERE"] == "command-a-plus-05-2026"
+    assert DEFAULT_PROVIDER_MODELS["NVIDIA"] == "nvidia/nemotron-3-super-120b-a12b"
+    assert DEFAULT_PROVIDER_MODELS["NVIDIA_NIM"] == "nvidia/nemotron-3-super-120b-a12b"
+    assert DEFAULT_PROVIDER_MODELS["NVIDIA"] == DEFAULT_PROVIDER_MODELS["NVIDIA_NIM"]

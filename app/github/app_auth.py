@@ -26,22 +26,34 @@ class GitHubAppConfig:
         if missing:
             raise GitHubConfigurationError(f"Missing required GitHub App configuration: {', '.join(missing)}")
 
+        try:
+            int(app_id)
+        except ValueError:
+            raise GitHubConfigurationError(f"GITHUB_APP_ID must be a numeric integer, got '{app_id}'")
+
         # Dual-support: inline PEM string or file path
         if "BEGIN" in private_key_raw and "PRIVATE KEY" in private_key_raw:
             # Inline PEM (possibly with literal \n escapes from env var)
             private_key = private_key_raw.replace("\\n", "\n")
-        elif os.path.isfile(private_key_raw):
-            # File path to PEM
-            with open(private_key_raw, "r") as f:
-                private_key = f.read()
-            if "BEGIN" not in private_key or "PRIVATE KEY" not in private_key:
-                raise GitHubConfigurationError(
-                    f"GITHUB_PRIVATE_KEY file '{private_key_raw}' does not contain a valid PEM private key"
-                )
         else:
-            raise GitHubConfigurationError(
-                "GITHUB_PRIVATE_KEY is neither a valid inline PEM string nor an existing file path"
-            )
+            is_file = False
+            try:
+                is_file = bool(private_key_raw and os.path.isfile(private_key_raw))
+            except (OSError, ValueError):
+                is_file = False
+
+            if is_file:
+                # File path to PEM
+                with open(private_key_raw, "r", encoding="utf-8") as f:
+                    private_key = f.read()
+                if "BEGIN" not in private_key or "PRIVATE KEY" not in private_key:
+                    raise GitHubConfigurationError(
+                        "GITHUB_PRIVATE_KEY file does not contain a valid PEM private key"
+                    )
+            else:
+                raise GitHubConfigurationError(
+                    "GITHUB_PRIVATE_KEY is neither a valid inline PEM string nor an existing file path"
+                )
 
         return cls(app_id=app_id, private_key=private_key, webhook_secret=secret)
 

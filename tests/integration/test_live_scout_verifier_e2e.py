@@ -77,9 +77,16 @@ async def test_live_scout_and_verifier_pipeline():
     expect_issue_creation = os.environ.get("LIVE_E2E_EXPECT_ISSUE_CREATION") == "1"
     expected_changed_file = os.environ.get("LIVE_E2E_EXPECTED_CHANGED_FILE", "").strip()
 
-    if not owner or not repo or not expected_repo_id_str:
+    # STEP 5: Contradictory write flags must fail immediately
+    if expect_issue_creation and not allow_writes:
+        pytest.fail(
+            "LIVE_E2E_EXPECT_ISSUE_CREATION=1 requires LIVE_E2E_ALLOW_ISSUE_WRITES=1"
+        )
+
+    # STEP 6: SKIP ONLY WHEN REQUIRED CONFIGURATION IS ABSENT
+    if not owner or not repo:
         pytest.skip(
-            "LIVE_E2E_OWNER, LIVE_E2E_REPO, or LIVE_E2E_EXPECTED_REPO_ID is not configured."
+            "LIVE_E2E_OWNER or LIVE_E2E_REPO is not configured."
         )
 
     if not inst_id_str:
@@ -90,6 +97,14 @@ async def test_live_scout_and_verifier_pipeline():
             "LIVE_E2E_BEFORE_SHA and LIVE_E2E_COMMIT_SHA are required for live testing."
         )
 
+    # Required GitHub App environment variables completely absent -> SKIP
+    app_id = os.environ.get("GITHUB_APP_ID", "").strip()
+    priv_key_raw = os.environ.get("GITHUB_PRIVATE_KEY", "").strip()
+    webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
+    if not app_id and not priv_key_raw and not webhook_secret:
+        pytest.skip("Required GitHub App environment variables completely absent.")
+
+    # Once configuration has been SUPPLIED, invalid behavior must FAIL.
     sha_pattern = re.compile(r"^[0-9a-fA-F]{40}$")
     if not sha_pattern.match(before_sha) or not sha_pattern.match(commit_sha):
         pytest.fail(
@@ -97,11 +112,16 @@ async def test_live_scout_and_verifier_pipeline():
             "Must be 40-character hexadecimal Git commit SHAs."
         )
 
+    # STEP 7: Validate before_sha != commit_sha before any LLM call
+    if before_sha == commit_sha:
+        pytest.fail(
+            "LIVE_E2E_BEFORE_SHA and LIVE_E2E_COMMIT_SHA must refer to different commits"
+        )
+
     try:
-        expected_repo_id = int(expected_repo_id_str)
         installation_id = int(inst_id_str)
     except ValueError as exc:
-        pytest.fail(f"Numeric conversion failure for repo or installation ID: {exc}")
+        pytest.fail(f"Numeric conversion failure for LIVE_E2E_INSTALLATION_ID: {exc}")
 
     # Validate that we are not targeting production issueAnalyzer repository unless explicitly configured
     if repo.lower() == "issueanalyzer" and os.environ.get("CONFIRM_ISSUEANALYZER_AS_SANDBOX") != "1":
@@ -109,12 +129,12 @@ async def test_live_scout_and_verifier_pipeline():
             "Safety halt: live sandbox cannot be 'issueAnalyzer' unless CONFIRM_ISSUEANALYZER_AS_SANDBOX=1"
         )
 
-    # Initialize GitHub App authenticator
+    # Initialize GitHub App authenticator (fail if supplied config is malformed)
     try:
         app_config = GitHubAppConfig.from_environment()
         authenticator = GitHubAppAuthenticator(app_config)
     except Exception as exc:
-        pytest.skip(f"GitHub App credentials not configured: {exc}")
+        pytest.fail(f"Invalid GitHub App configuration: {exc}")
 
     # Use temporary sqlite DB for dedup and journal
     import tempfile
@@ -125,10 +145,13 @@ async def test_live_scout_and_verifier_pipeline():
         write_journal = SQLiteIssueWriteJournal(db_path=db_path)
 
         async def real_client_factory(inst_id: int):
-            raw_client = await authenticator.create_installation_client(inst_id)
+            try:
+                raw_client = await authenticator.create_installation_client(inst_id)
+            except Exception as exc:
+                pytest.fail(f"GitHub installation-token exchange failed for installation {inst_id}: {exc}")
             return GuardedGitHubClient(raw_client, allow_writes=allow_writes)
 
-        # Build ScoutService with real providers (fail-closed if credentials missing)
+        # Build ScoutService with real providers (fail-closed on invalid provider setup)
         try:
             scout_service = build_scout_service(
                 dedup_store=dedup_store,
@@ -136,20 +159,48 @@ async def test_live_scout_and_verifier_pipeline():
                 client_factory=real_client_factory,
             )
         except Exception as exc:
-            pytest.skip(f"Live LLM provider setup failed: {exc}")
+            pytest.fail(f"Live LLM provider setup failed: {exc}")
 
-        # Verify numeric repository ID against live GitHub API before proceeding
+        # Obtain client for pre-flight repository and commit comparison checks
         client = await real_client_factory(installation_id)
         try:
             repo_data = await client.get_repository(owner, repo)
         except Exception as exc:
-            pytest.skip(f"Failed to access live repository '{owner}/{repo}': {exc}")
+            pytest.fail(f"Failed to access live repository '{owner}/{repo}': {exc}")
 
         actual_repo_id = repo_data.get("id")
-        if actual_repo_id != expected_repo_id:
+        if not actual_repo_id:
+            pytest.fail(f"Could not retrieve repository ID for '{owner}/{repo}'")
+
+        if expected_repo_id_str:
+            try:
+                expected_repo_id = int(expected_repo_id_str)
+            except ValueError as exc:
+                pytest.fail(f"Numeric conversion failure for LIVE_E2E_EXPECTED_REPO_ID: {exc}")
+            if actual_repo_id != expected_repo_id:
+                pytest.fail(
+                    f"Numeric repo ID mismatch: expected {expected_repo_id}, got {actual_repo_id}. Aborting."
+                )
+
+        # STEP 7: Compare commits before any LLM call using real client method
+        try:
+            comparison = await client.compare_commits(owner, repo, before_sha, commit_sha)
+        except Exception as exc:
             pytest.fail(
-                f"Numeric repo ID mismatch: expected {expected_repo_id}, got {actual_repo_id}. Aborting."
+                f"Commit comparison failed between {before_sha} and {commit_sha}: {exc}"
             )
+
+        # STEP 8: Validate expected changed file before LLM call
+        if expected_changed_file:
+            changed_paths = [
+                item["filename"]
+                for item in comparison.get("files", [])
+                if isinstance(item, dict) and "filename" in item
+            ]
+            if expected_changed_file not in changed_paths:
+                pytest.fail(
+                    f"Expected changed file '{expected_changed_file}' not found in comparison files: {changed_paths}"
+                )
 
         default_branch = repo_data.get("default_branch", "main")
 
@@ -179,10 +230,9 @@ async def test_live_scout_and_verifier_pipeline():
                 f"Expected changed file '{expected_changed_file}' not found in {result.changed_files}"
             )
 
+        # STEP 4: Remove misleading arithmetic; verify real fields for LIVE_E2E_EXPECT_ISSUE_CREATION=1
         if expect_issue_creation:
+            assert result.failures == []
             assert result.ai_drafts >= 1, "Expected Scout to produce at least 1 draft finding"
             assert result.escalated_findings >= 1, "Expected at least 1 finding to pass worthiness filter"
-            assert (result.escalated_findings - result.verifier_rejected) >= 1, (
-                "Expected at least 1 finding to survive Verifier evaluation"
-            )
             assert result.issues_created >= 1, "Expected at least 1 GitHub issue to be created in sandbox"
