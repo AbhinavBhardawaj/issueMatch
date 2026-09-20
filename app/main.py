@@ -1,4 +1,6 @@
 """Application factories for test injection and environment-based production wiring."""
+from dotenv import load_dotenv
+load_dotenv()
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -6,7 +8,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth import router as auth_router
 from app.api.scout import router as scout_router
 from app.api.verify import router as verify_router
 from app.candidates.repository import (
@@ -213,6 +217,17 @@ def create_application(
             await worker.stop()
 
     application = FastAPI(title="IssueMatch", lifespan=lifespan)
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:5173")],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    application.include_router(auth_router, prefix="/api")
+    from app.api.repos import router as repos_router
+    application.include_router(repos_router, prefix="/api")
 
     application.state.config = resolved_config
     application.state.delivery_store = app_delivery_store

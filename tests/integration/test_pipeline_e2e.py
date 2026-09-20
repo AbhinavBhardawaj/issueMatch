@@ -40,8 +40,8 @@ def get_installation_token():
 def get_sample_finding():
     return dict(
         finding_id="F-nitiflow-e2e-001",
-        installation_id=os.environ.get("GH_INSTALLATION_ID") if os.environ.get("GH_INSTALLATION_ID") else None,
-        repository_id=os.environ.get("GH_REPO_ID", "0"),
+        installation_id=os.environ.get("GH_INSTALLATION_ID") or os.environ.get("GITHUB_INSTALLATION_ID") or "162794652",
+        repository_id=os.environ.get("GH_REPO_ID", "1293872452"),
         commit_sha=os.environ.get("GH_COMMIT_SHA", ""),    # latest SHA on default branch
         title="Global error handler registered after app.listen() — never executes",
         severity="medium",
@@ -94,8 +94,8 @@ async def test_e2e_creates_issue_in_nitiflow():
 def get_false_positive_finding():
     return dict(
         finding_id="F-nitiflow-e2e-false",
-        installation_id=os.environ.get("GH_INSTALLATION_ID") if os.environ.get("GH_INSTALLATION_ID") else None,
-        repository_id=os.environ.get("GH_REPO_ID", "0"),
+        installation_id=os.environ.get("GH_INSTALLATION_ID") or os.environ.get("GITHUB_INSTALLATION_ID") or "162794652",
+        repository_id=os.environ.get("GH_REPO_ID", "1293872452"),
         commit_sha=os.environ.get("GH_COMMIT_SHA", ""),
         title="Missing /api/health healthcheck endpoint",
         severity="low",

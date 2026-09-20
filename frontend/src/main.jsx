@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams, Link } from 'react-router-dom';
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -21,10 +22,11 @@ function Mark() {
 
 function GithubWindow() {
   return (
-    <div style={{ padding: "2rem", border: "1px solid #333", borderRadius: "8px", background: "#111", color: "#888", textAlign: "center" }}>
-      GithubWindow Component Placeholder
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '780px', margin: '0 auto' }}>
+      <img src="/bot-accepted.png" alt="Bot ACCEPTED response" style={{ width: '100%', borderRadius: '10px', border: '1px solid #30363d' }} />
+      <img src="/bot-revision.png" alt="Bot REVISION_REQUIRED response" style={{ width: '100%', borderRadius: '10px', border: '1px solid #30363d' }} />
     </div>
-  );
+  )
 }
 
 function GitHubIcon() {
@@ -42,7 +44,7 @@ function Arrow() {
   return <span className="arrow">↗</span>;
 }
 
-function Navbar() {
+function Navbar({ onOpenPanel }) {
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -69,10 +71,17 @@ function Navbar() {
           ))}
         </div>
 
-        <a className="nav-cta" href="#product">
-          <GitHubIcon />
-          Install App <Arrow />
-        </a>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <a className="nav-cta" href="/login">
+            <GitHubIcon />
+            Sign in <Arrow />
+          </a>
+          {onOpenPanel && (
+            <button className="nav-cta" onClick={onOpenPanel} style={{ cursor: 'pointer', border: 'none', color: 'var(--text)' }}>
+              Story
+            </button>
+          )}
+        </div>
       </nav>
     </div>
   );
@@ -106,50 +115,6 @@ function Reveal({ children, className = "" }) {
 }
 
 function Hero() {
-  useEffect(() => {
-    const stage = document.querySelector(".earth-stage");
-    const earth = document.querySelector(".earth");
-
-    if (!stage || !earth) return;
-
-    const move = (event) => {
-      const rect = stage.getBoundingClientRect();
-
-      const x = (event.clientX - rect.left) / rect.width - 0.5;
-      const y = (event.clientY - rect.top) / rect.height - 0.5;
-
-      const rotateY = x * 7;
-      const rotateX = y * -5;
-
-      const moveX = x * 14;
-      const moveY = y * 9;
-
-      earth.style.transform = `
-        translate3d(${moveX}px, ${moveY}px, 0)
-        rotateX(${rotateX}deg)
-        rotateY(${rotateY}deg)
-        scale(1.012)
-      `;
-    };
-
-    const reset = () => {
-      earth.style.transform = `
-        translate3d(0, 0, 0)
-        rotateX(0deg)
-        rotateY(0deg)
-        scale(1)
-      `;
-    };
-
-    stage.addEventListener("pointermove", move);
-    stage.addEventListener("pointerleave", reset);
-
-    return () => {
-      stage.removeEventListener("pointermove", move);
-      stage.removeEventListener("pointerleave", reset);
-    };
-  }, []);
-
   return (
     <section className="hero" id="top">
       <div className="starfield" aria-hidden="true" />
@@ -183,7 +148,7 @@ function Hero() {
           <img
             className="earth"
             id="earth"
-            src="/src/assets/earth.png"
+            src="/earth.png"
             alt="Nighttime Earth with global contributor connections"
           />
         </Reveal>
@@ -277,7 +242,7 @@ function OpenSourceScroll() {
             <div className="journey-rail-line" />
             <img
               className="osi-runner"
-              src="/src/assets/osi-mark.png"
+              src="/osi-mark.png"
               alt="Open Source Initiative mark"
               style={{ top: `${logoTop}%` }}
             />
@@ -477,23 +442,8 @@ function Infrastructure() {
               Event-driven by design.
               <span>Human-controlled by default.</span>
             </h2>
-            <p className="section-side-copy">
-              AWS handles bursty webhook traffic, durable workflows, AI reasoning
-              and authoritative state — without turning every box into a microservice.
-            </p>
           </div>
         </Reveal>
-
-        <div className="infra-track">
-          {nodes.map(([number, name, role], i) => (
-            <Reveal className="infra-node" key={name}>
-              <span className="mono">{number}</span>
-              <strong>{name}</strong>
-              <small>{role}</small>
-              {i < nodes.length - 1 && <i className="connector" />}
-            </Reveal>
-          ))}
-        </div>
 
         <Reveal className="invariant-panel">
           <div className="invariant-copy">
@@ -513,7 +463,7 @@ function Infrastructure() {
   );
 }
 
-function FinalCTA() {
+function FinalCTA({ onOpenPanel }) {
   return (
     <section className="final">
       <div className="final-constellation" aria-hidden="true">
@@ -537,9 +487,9 @@ function FinalCTA() {
             <a className="btn btn-primary" href="#top">
               Install on GitHub <GitHubIcon /> <Arrow />
             </a>
-            <a className="btn btn-secondary" href="#origin">
+            <button className="btn btn-secondary" onClick={onOpenPanel} style={{ cursor: 'pointer' }}>
               Our story <Arrow />
-            </a>
+            </button>
           </div>
         </Reveal>
 
@@ -553,25 +503,678 @@ function FinalCTA() {
   );
 }
 
-function App() {
+
+function Badge({ status }) {
+  let styleClass = '';
+  switch (status?.toLowerCase()) {
+    case 'verified':
+    case 'accepted':
+      styleClass = 'badge-success';
+      break;
+    case 'rejected':
+    case 'declined':
+    case 'error':
+      styleClass = 'badge-danger';
+      break;
+    case 'verifying':
+    case 'monitoring':
+    case 'waiting':
+      styleClass = 'badge-info';
+      break;
+    case 'proposed':
+    case 'revision required':
+      styleClass = 'badge-warning';
+      break;
+    default:
+      styleClass = 'badge-muted';
+  }
+  return <span className={`status-badge ${styleClass}`}>{status.toUpperCase()}</span>;
+}
+
+function Panel({ open, onClose }) {
+  const closeRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    closeRef.current?.focus();
+    const onKey = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
   return (
     <>
-      <Navbar />
+      <div className={`panel-backdrop${open ? ' open' : ''}`} onClick={onClose} aria-hidden="true" />
+      <aside className={`panel${open ? ' open' : ''}`} role="dialog" aria-modal="true" aria-label="Story dashboard">
+        <div className="panel-header">
+          <span className="panel-title">Story</span>
+          <button ref={closeRef} className="panel-close" onClick={onClose} aria-label="Close panel">x</button>
+        </div>
+        <div className="panel-body" role="tabpanel">
+          <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '32px' }}>
+
+            {/* What we built */}
+            <div>
+              <h3 style={{ fontSize: '11px', letterSpacing: '0.1em', textTransform: 'uppercase', color: '#8b949e', marginBottom: '12px' }}>What we built</h3>
+              <p style={{ fontSize: '15px', lineHeight: '1.6', color: '#e6edf3', margin: 0 }}>
+                IssueScout is an AI agent that analyzes your codebase to find potential bugs. 
+                IssueVerify is an independent agent that validates those findings before a GitHub 
+                issue is ever created. A third bot evaluates contributor comments — checking 
+                whether a proposed fix actually matches the issue and the codebase.
+              </p>
+            </div>
+
+            {/* Why we built it */}
+            <div>
+              <h3 style={{ fontSize: '11px', letterSpacing: '0.1em', textTransform: 'uppercase', color: '#8b949e', marginBottom: '12px' }}>Why we built it</h3>
+              <p style={{ fontSize: '15px', lineHeight: '1.6', color: '#e6edf3', margin: 0 }}>
+                Open source contributors spend hours hunting for genuine issues. Maintainers 
+                manually evaluate every contributor claim. We automated the discovery and 
+                qualification layer — keeping the final decision with the maintainer.
+              </p>
+            </div>
+
+            {/* Team photo */}
+            <div>
+              <h3 style={{ fontSize: '11px', letterSpacing: '0.1em', textTransform: 'uppercase', color: '#8b949e', marginBottom: '16px' }}>The team</h3>
+              <img 
+                src="/photo.jpeg" 
+                alt="Team" 
+                style={{ width: '100%', borderRadius: '10px', border: '1px solid #30363d', marginBottom: '20px' }} 
+              />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ padding: '12px 16px', background: '#161b22', borderRadius: '8px', border: '1px solid #21262d' }}>
+                  <div style={{ fontSize: '14px', fontWeight: '600', color: '#e6edf3' }}>Atul Kumar &amp; Abhinav Bharadwaj</div>
+                  <div style={{ fontSize: '12px', color: '#8b949e', marginTop: '4px' }}>Claim assignment · AWS integration</div>
+                </div>
+                <div style={{ padding: '12px 16px', background: '#161b22', borderRadius: '8px', border: '1px solid #21262d' }}>
+                  <div style={{ fontSize: '14px', fontWeight: '600', color: '#e6edf3' }}>Yashas K N &amp; Koushik Suresh</div>
+                  <div style={{ fontSize: '12px', color: '#8b949e', marginTop: '4px' }}>Issue creation · Frontend</div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function Products() {
+  return (
+    <section className="section products-section" id="product">
+      <div className="wrap">
+        <Reveal>
+          <div className="product-cards">
+            <div className="product-card">
+              <div className="product-label mono">PRODUCT A · ISSUE SCOUT</div>
+              <h3 className="product-heading">Find issues before users do.</h3>
+              <p className="product-desc">Every push to your default branch is analysed. Scout proposes findings. An independent verifier challenges each one. Only verified findings become GitHub issues.</p>
+              <a href={import.meta.env.VITE_SCOUT_APP_INSTALL_URL} target="_blank" rel="noopener noreferrer" className="btn btn-secondary product-btn">Install Issue Scout →</a>
+            </div>
+            <div className="product-card">
+              <div className="product-label mono">PRODUCT B · ASSIGNMENT BOT</div>
+              <h3 className="product-heading">Right contributor, right issue.</h3>
+              <p className="product-desc">Contributors comment with an implementation approach. The bot evaluates it against the issue and codebase. A maintainer gets a recommendation — never an automatic assignment.</p>
+              <a href={import.meta.env.VITE_ASSIGNMENT_APP_INSTALL_URL} target="_blank" rel="noopener noreferrer" className="btn btn-secondary product-btn">Install Assignment Bot →</a>
+              <div className="product-warning mono">Never assigns automatically. Maintainer decides.</div>
+            </div>
+          </div>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+const AuthContext = React.createContext(null)
+
+function useAuth() {
+  return React.useContext(AuthContext)
+}
+
+function AuthProvider({ children }) {
+  const [user, setUser] = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
+
+  React.useEffect(() => {
+    // Check if backend session exists
+    fetch('/api/auth/me', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { setUser(data); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [])
+
+  return (
+    <AuthContext.Provider value={{ user, setUser, loading }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+function AuthGuard({ children }) {
+  const { user, loading } = useAuth()
+  if (loading) return <FullPageSpinner />
+  if (!user) return <Navigate to="/login" replace />
+  return children
+}
+
+function FullPageSpinner() {
+  return (
+    <div className="fullpage-center">
+      <div className="spinner" aria-label="Loading" />
+    </div>
+  )
+}
+
+function LoginPage() {
+  const { user } = useAuth()
+
+  // If already logged in, go to dashboard
+  if (user) return <Navigate to="/dashboard" replace />
+
+  const handleLogin = () => {
+    // Redirect to backend GitHub OAuth start
+    window.location.href = '/api/auth/github'
+  }
+
+  return (
+    <div className="login-page">
+      <div className="login-card glass-card">
+        <a className="brand login-brand" href="/">
+          <Mark />
+          <span className="brand-name">issueMatch</span>
+        </a>
+
+        <h1 className="login-heading">Welcome back.</h1>
+        <p className="login-sub">
+          Sign in with GitHub to manage your repositories and view bot activity.
+        </p>
+
+        <button className="btn btn-primary login-btn" onClick={handleLogin}>
+          <GitHubIcon />
+          Continue with GitHub
+        </button>
+
+        <p className="login-footer-note">
+          By signing in you authorise issueMatch to read your repository list.
+          No code is accessed without installing the GitHub App on a specific repository.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+const MOCK_REPOS = [
+  { owner: 'acme-org', repo: 'api-service',   scout: true,  lastPush: '2 hours ago',   findings: 3 },
+  { owner: 'acme-org', repo: 'frontend',       scout: false, lastPush: '1 day ago',     findings: 0 },
+  { owner: 'acme-org', repo: 'auth-service',   scout: true,  lastPush: '3 hours ago',   findings: 1 },
+  { owner: 'acme-org', repo: 'workers',        scout: false, lastPush: '5 days ago',    findings: 0 },
+]
+
+function DashNav({ user }) {
+  const { setUser } = useAuth()
+  const navigate = useNavigate()
+
+  const handleLogout = () => {
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+      .finally(() => { setUser(null); navigate('/') })
+  }
+
+  return (
+    <div className="dashnav">
+      <a className="brand dashnav-brand" href="/">
+        <Mark />
+        <span className="brand-name">issueMatch</span>
+      </a>
+      <div className="dashnav-right">
+        {user && (
+          <span className="dashnav-user">
+            {user.avatar && <img src={user.avatar} alt="" className="dashnav-avatar" />}
+            {user.login}
+          </span>
+        )}
+        <button className="btn btn-secondary dashnav-logout" onClick={handleLogout}
+          style={{ fontSize: '12px', padding: '8px 14px' }}>
+          Sign out
+        </button>
+      </div>
+    </div>
+  )
+}
+
+const INSTALL_SCOUT_URL = import.meta.env.VITE_SCOUT_APP_INSTALL_URL || 'https://github.com/apps/verifier-bot-dev/installations/new'
+const INSTALL_ASSIGN_URL = import.meta.env.VITE_ASSIGNMENT_APP_INSTALL_URL || 'https://github.com/apps/PLACEHOLDER/installations/new'
+
+function InstallGate({ onContinue }) {
+  const navigate = useNavigate()
+
+  return (
+    <div style={{ maxWidth: '520px', margin: '64px auto 0', padding: '0 24px' }}>
+      <h1 className="dash-heading" style={{ marginBottom: '12px' }}>Get started</h1>
+      <p className="dash-sub" style={{ marginBottom: '40px' }}>
+        Install at least one GitHub App to start monitoring your repositories.
+        You choose exactly which repos get access during installation.
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '32px' }}>
+        <div className="glass-card" style={{ padding: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+            <div>
+              <div style={{ fontSize: '11px', fontFamily: 'var(--mono)', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: '6px' }}>OPTIONAL</div>
+              <div style={{ fontWeight: 500, marginBottom: '6px' }}>Issue Scout</div>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                Analyses every push and opens GitHub issues for verified findings.
+              </div>
+            </div>
+            <a
+              href={INSTALL_SCOUT_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn btn-secondary"
+              style={{ fontSize: '13px', whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              Install <Arrow />
+            </a>
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+            <div>
+              <div style={{ fontSize: '11px', fontFamily: 'var(--mono)', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: '6px' }}>OPTIONAL</div>
+              <div style={{ fontWeight: 500, marginBottom: '6px' }}>Assignment Bot</div>
+              <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                Evaluates contributor approaches and recommends who to assign.
+              </div>
+            </div>
+            <a
+              href={INSTALL_ASSIGN_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn btn-secondary"
+              style={{ fontSize: '13px', whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              Install <Arrow />
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <button
+        className="btn btn-primary"
+        style={{ width: '100%', justifyContent: 'center', fontSize: '15px', padding: '14px' }}
+        onClick={onContinue}
+      >
+        I've installed — take me to my dashboard →
+      </button>
+
+      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '16px', textAlign: 'center' }}>
+        Install at least one app first, then click the button above.
+      </p>
+    </div>
+  )
+}
+
+function SetupPage() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+
+  return (
+    <div className="dash-shell">
+      <DashNav user={user} />
+      <div className="dash-body">
+        <div style={{ maxWidth: '520px', margin: '64px auto 0', padding: '0 24px' }}>
+          <h1 className="dash-heading" style={{ marginBottom: '12px' }}>Install GitHub Apps</h1>
+          <p className="dash-sub" style={{ marginBottom: '40px' }}>
+            Install one or both apps on your repositories. You choose exactly
+            which repos get access during installation.
+          </p>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '32px' }}>
+            <div className="glass-card" style={{ padding: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+                <div>
+                  <div style={{ fontSize: '11px', fontFamily: 'var(--mono)', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: '6px' }}>PRODUCT A</div>
+                  <div style={{ fontWeight: 500, marginBottom: '6px' }}>Issue Scout</div>
+                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                    Analyses every push and opens GitHub issues for verified findings.
+                  </div>
+                </div>
+                <a
+                  href={INSTALL_SCOUT_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-secondary"
+                  style={{ fontSize: '13px', whiteSpace: 'nowrap', flexShrink: 0 }}
+                >
+                  Install <Arrow />
+                </a>
+              </div>
+            </div>
+
+            <div className="glass-card" style={{ padding: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+                <div>
+                  <div style={{ fontSize: '11px', fontFamily: 'var(--mono)', letterSpacing: '0.08em', color: 'var(--text-secondary)', marginBottom: '6px' }}>PRODUCT B</div>
+                  <div style={{ fontWeight: 500, marginBottom: '6px' }}>Assignment Bot</div>
+                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                    Evaluates contributor approaches and recommends who to assign.
+                  </div>
+                </div>
+                <a
+                  href={INSTALL_ASSIGN_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-secondary"
+                  style={{ fontSize: '13px', whiteSpace: 'nowrap', flexShrink: 0 }}
+                >
+                  Install <Arrow />
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <button
+            className="btn btn-primary"
+            style={{ width: '100%', justifyContent: 'center', fontSize: '15px', padding: '14px' }}
+            onClick={() => navigate('/dashboard')}
+          >
+            Go to dashboard →
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RepoPicker() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const [repos, setRepos] = React.useState([])
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState(null)
+
+  React.useEffect(() => {
+    fetch('/api/repos', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : Promise.reject('Failed to load repos'))
+      .then(data => { setRepos(data); setLoading(false) })
+      .catch(err => {
+        setError(typeof err === 'string' ? err : 'Could not load repositories.')
+        setLoading(false)
+      })
+  }, [])
+
+  const hasRepos = repos.length > 0
+
+  return (
+    <div className="dash-shell">
+      <DashNav user={user} />
+      <div className="dash-body">
+        {loading && <FullPageSpinner />}
+
+        {!loading && error && (
+          <div className="repopicker-wrap">
+            <div className="dash-error">{error}</div>
+          </div>
+        )}
+
+        {!loading && !error && !hasRepos && <Navigate to="/setup" replace />}
+
+        {!loading && !error && hasRepos && (
+          <div className="repopicker-wrap">
+            <div className="repopicker-header">
+              <h1 className="dash-heading">Your repositories</h1>
+              <p className="dash-sub">Select a repository to view bot activity and manage settings.</p>
+            </div>
+
+            <div className="install-nudge glass-card" style={{ marginBottom: '24px' }}>
+              <p className="install-nudge-text">Don't see a repository?</p>
+              <Link
+                to="/setup"
+                className="btn btn-secondary"
+                style={{ fontSize: '13px' }}
+              >
+                Install GitHub Apps <Arrow />
+              </Link>
+            </div>
+
+            <div className="repo-list">
+              {repos.map(r => (
+                <button
+                  key={`${r.owner}/${r.repo}`}
+                  className="repo-card"
+                  onClick={() => navigate(`/dashboard/${r.owner}/${r.repo}`)}
+                >
+                  <div className="repo-card-left">
+                    <div className="repo-card-name">{r.owner} / <strong>{r.repo}</strong></div>
+                    <div className="repo-card-meta">Last push {r.lastPush}</div>
+                  </div>
+                  <div className="repo-card-right">
+                    {r.scout && <span className="badge badge-success">Scout on</span>}
+                    {r.findings > 0 && (
+                      <span className="repo-findings">{r.findings} findings</span>
+                    )}
+                    <span className="repo-arrow">→</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const MOCK_FINDINGS = [
+  { id: 'f1', commit: 'a3f9c12', title: 'Unhandled promise rejection in payment webhook', status: 'verified',  issueUrl: 'https://github.com/acme-org/api-service/issues/142', time: '2h ago' },
+  { id: 'f2', commit: 'b7d2e88', title: 'Rate limiter bypass via header spoofing',          status: 'verifying', issueUrl: null, time: '18m ago' },
+  { id: 'f3', commit: 'c1a4f55', title: 'Memory leak in useEffect — missing cleanup',       status: 'proposed',  issueUrl: null, time: '5m ago' },
+  { id: 'f4', commit: 'd9b3c71', title: 'Database pool config flagged incorrectly',         status: 'rejected',  issueUrl: null, time: '1d ago' },
+  { id: 'f5', commit: 'e2f8a30', title: 'Monitoring push on default branch',                status: 'monitoring',issueUrl: null, time: 'just now' },
+]
+
+const MOCK_ASSIGNMENTS = [
+  { id: 'a1', issue: '#142 — Unhandled promise rejection', candidate: '@sara-dev',        outcome: 'accepted',  feedback: 'Approach identifies the correct async boundary. Aligns with existing patterns.',        time: '1h ago' },
+  { id: 'a2', issue: '#88 — Memory leak in Dashboard',     candidate: '@ben-writes-code', outcome: 'revision required',  feedback: 'Correct direction but proposes class lifecycle — this is a hooks component.',            time: '3h ago' },
+  { id: 'a3', issue: '#31 — Token refresh race condition', candidate: '@miko-sec',        outcome: 'declined',  feedback: 'No code-relevant detail about the specific race condition in the token refresh flow.',    time: '5h ago' },
+  { id: 'a4', issue: '#88 — Memory leak in Dashboard',     candidate: '@priya-frontend',  outcome: 'waiting',   feedback: 'Earlier candidate accepted. Evaluation paused until maintainer unassigns.',               time: '2h ago' },
+]
+
+function RepoDashboard() {
+  const { owner, repo } = useParams()
+  const { user } = useAuth()
+  const navigate = useNavigate()
+  const [scoutEnabled, setScoutEnabled] = React.useState(true)
+  const [findings, setFindings] = React.useState([])
+  const [assignments, setAssignments] = React.useState([])
+  const [togglingScout, setTogglingScout] = React.useState(false)
+  const [loading, setLoading] = React.useState(true)
+
+  React.useEffect(() => {
+    const headers = { credentials: 'include' }
+    Promise.all([
+      fetch(`/api/repos/${owner}/${repo}/scout/enabled`, headers).then(r => r.json()),
+      fetch(`/api/repos/${owner}/${repo}/scout/findings`, headers).then(r => r.json()),
+      fetch(`/api/repos/${owner}/${repo}/assignments`, headers).then(r => r.json()),
+    ])
+      .then(([toggle, finds, assigns]) => {
+        setScoutEnabled(toggle.enabled ?? true)
+        setFindings(Array.isArray(finds) ? finds : [])
+        setAssignments(Array.isArray(assigns) ? assigns : [])
+      })
+      .catch(err => console.error('Dashboard load error:', err))
+      .finally(() => setLoading(false))
+  }, [owner, repo])
+
+  const handleToggleScout = () => {
+    setTogglingScout(true)
+    fetch(`/api/repos/${owner}/${repo}/scout/enabled`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !scoutEnabled })
+    })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setScoutEnabled(data.enabled))
+      .catch(() => {})
+      .finally(() => setTogglingScout(false))
+  }
+
+  return (
+    <div className="dash-shell">
+      <DashNav user={user} />
+      <div className="dash-body">
+        <div className="repodash-wrap">
+
+          {/* Breadcrumb */}
+          <div className="dash-breadcrumb">
+            <button className="dash-back" onClick={() => navigate('/dashboard')}>← Repositories</button>
+            <span className="dash-breadcrumb-sep">/</span>
+            <span className="dash-breadcrumb-repo">{owner} / <strong>{repo}</strong></span>
+          </div>
+
+          {loading && <div style={{ color: 'var(--text-secondary)', marginBottom: '32px', fontSize: '14px' }}>Loading…</div>}
+
+          {/* Two panels side by side */}
+          <div className="repodash-grid">
+
+            {/* Left: Assignment Bot */}
+            <div className="dash-panel">
+              <div className="dash-panel-header">
+                <div>
+                  <div className="dash-panel-tag">Product B</div>
+                  <h2 className="dash-panel-title">Assignment Bot</h2>
+                  <p className="dash-panel-desc">Always active. Evaluates contributor approaches on issue comments.</p>
+                </div>
+                <span className="badge badge-success" style={{ flexShrink: 0, display: 'inline-block', borderRadius: '999px', padding: '2px 9px', fontSize: '10px', fontFamily: 'var(--mono)', letterSpacing: '0.05em', whiteSpace: 'nowrap', background: 'rgba(52, 211, 153, 0.15)', color: 'var(--green)' }}>Always on</span>
+              </div>
+
+              <div className="dash-panel-notice">
+                The bot recommends. <strong>You assign.</strong> Every evaluation posts a comment directly on the GitHub issue.
+              </div>
+
+              <div className="dash-panel-list">
+                {assignments.length === 0 && !loading && (
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '13px', padding: '16px 0' }}>
+                    No open issues found in this repository.
+                  </div>
+                )}
+                {assignments.map(a => (
+                  <div key={a.id} className="dash-item">
+                    <div className="dash-item-header">
+                      <span className="dash-item-title">{a.issue}</span>
+                      <Badge status={a.outcome} />
+                    </div>
+                    <div className="dash-item-meta">{a.candidate} · {a.time}</div>
+                    <div className="dash-item-feedback">{a.feedback}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Right: Issue Scout */}
+            <div className="dash-panel">
+              <div className="dash-panel-header">
+                <div>
+                  <div className="dash-panel-tag">Product A</div>
+                  <h2 className="dash-panel-title">Issue Scout</h2>
+                  <p className="dash-panel-desc">Analyses every push to the default branch for code-grounded problems.</p>
+                </div>
+                <button
+                  className={`scout-toggle ${scoutEnabled ? 'on' : 'off'} ${togglingScout ? 'loading' : ''}`}
+                  onClick={handleToggleScout}
+                  aria-label={scoutEnabled ? 'Disable Issue Scout' : 'Enable Issue Scout'}
+                  disabled={togglingScout}
+                >
+                  <span className="scout-toggle-knob" />
+                </button>
+              </div>
+
+              {!scoutEnabled && (
+                <div className="dash-panel-notice warn">
+                  Scout is paused. Push events are not being analysed.
+                </div>
+              )}
+
+              {scoutEnabled && (
+                <div className="dash-panel-notice">
+                  Not every push creates an issue. Only verified findings become GitHub issues.
+                </div>
+              )}
+
+              <div className="dash-panel-list">
+                {findings.length === 0 && !loading && (
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '13px', padding: '16px 0' }}>
+                    No findings yet — push to the default branch to trigger a scan.
+                  </div>
+                )}
+                {findings.map(f => (
+                  <div key={f.id} className="dash-item">
+                    <div className="dash-item-header">
+                      <span className="dash-item-title">{f.title}</span>
+                      <Badge status={f.status} />
+                    </div>
+                    <div className="dash-item-meta">
+                      <code>{f.commit}</code> · {f.time}
+                    </div>
+                    {f.issueUrl && (
+                      <a href={f.issueUrl} target="_blank" rel="noopener noreferrer" className="dash-item-link">
+                        View GitHub issue →
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LandingApp() {
+  const [panelOpen, setPanelOpen] = React.useState(false)
+  return (
+    <>
+      <Navbar onOpenPanel={() => setPanelOpen(true)} />
       <main>
         <Hero />
         <OpenSourceScroll />
         <Product />
         <Workflow />
         <Scout />
+        <Products />
         <Infrastructure />
-        <FinalCTA />
+        <FinalCTA onOpenPanel={() => setPanelOpen(true)} />
       </main>
+      <Panel open={panelOpen} onClose={() => setPanelOpen(false)} />
     </>
-  );
+  )
 }
 
-createRoot(document.getElementById("root")).render(
+function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<LandingApp />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/dashboard" element={<AuthGuard><RepoPicker /></AuthGuard>} />
+          <Route path="/dashboard/:owner/:repo" element={<AuthGuard><RepoDashboard /></AuthGuard>} />
+          <Route path="/setup" element={<AuthGuard><SetupPage /></AuthGuard>} />
+<Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
+  )
+}
+
+createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
-);
+)
