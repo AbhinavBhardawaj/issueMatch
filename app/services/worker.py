@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any
 
+from app.candidates.service import CandidateService
 from app.github.events import (
     MalformedGitHubEvent,
     normalize_issue_assignment,
@@ -95,7 +96,11 @@ class DurableWebhookWorker:
 
             elif event_type == "issue_comment" and self.candidate_service:
                 comment_event = normalize_issue_comment_created(payload, delivery_id)
-                await self.candidate_service.process_issue_comment(comment_event)
+                if (job.get("attempt_count", 1) > 1
+                        and isinstance(self.candidate_service, CandidateService)):
+                    await self.candidate_service.resume_incomplete_issue_comment(comment_event)
+                else:
+                    await self.candidate_service.process_issue_comment(comment_event)
                 await self.delivery_store.complete_job(delivery_id, lease_token)
 
             elif event_type == "issues" and self.candidate_service:

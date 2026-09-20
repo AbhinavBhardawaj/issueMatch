@@ -7,6 +7,16 @@ from app.models.context import RepositoryAnalysisContext
 from .provider import EvidenceCitation
 
 
+def normalize_evidence_path(path: str, context: RepositoryAnalysisContext) -> str:
+    """Normalize only explicit repository prefixes, never guess a file by excerpt."""
+    value = path.strip().lstrip("/")
+    repository = context.repository_context
+    for prefix in (f"{repository.owner}/{repository.name}/", f"{repository.name}/"):
+        if value.startswith(prefix):
+            return value[len(prefix):]
+    return value
+
+
 def verify_evidence(evidence: list[EvidenceCitation], context: RepositoryAnalysisContext) -> list[str]:
     """Verify exact excerpts, not the semantic truth of model claims.
 
@@ -14,24 +24,11 @@ def verify_evidence(evidence: list[EvidenceCitation], context: RepositoryAnalysi
     cannot be cited. A verified excerpt is not proof of its interpretation.
     """
     files = {file.path: file for file in (*context.code_context.file_contents, *context.code_context.test_files)}
-    repo_name = context.repository_context.name
-    repo_owner = context.repository_context.owner
-    prefixes = (f"{repo_owner}/{repo_name}/", f"{repo_name}/")
     verified: list[str] = []
     for item in evidence:
-        raw_path = item.path.strip().lstrip("/")
-        normalized_path = raw_path
-        for prefix in prefixes:
-            if normalized_path.startswith(prefix):
-                normalized_path = normalized_path[len(prefix):]
-                break
-        file = files.get(normalized_path) or files.get(raw_path)
+        file = files.get(normalize_evidence_path(item.path, context))
         excerpt = item.excerpt.strip()
         claim = item.claim.strip()
-        if file is None and excerpt and len(excerpt) >= 8:
-            matching_files = [f for f in files.values() if excerpt in f.content]
-            if len(matching_files) == 1:
-                file = matching_files[0]
         if file is None:
             continue
         if not excerpt or not claim or excerpt not in file.content:

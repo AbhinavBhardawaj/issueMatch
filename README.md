@@ -145,6 +145,14 @@ matches issue terms to repository-tree filenames. Retrieval stays bounded to
 ## AI Configuration
 
 The Strands/Ollama provider is configured through environment variables.
+Candidate analysis uses Ollama by default, even when `NVIDIA_API_KEYS` is set
+for Issue Scout. Set `ISSUEMATCH_ANALYSIS_PROVIDER=ollama` explicitly if desired.
+The legacy NVIDIA candidate adapter returns free-form text and is not a valid
+structured-analysis provider; selecting it now fails at startup instead of
+silently posting an "analysis unavailable" notice for every approach.
+The production factory also checks `OLLAMA_HOST` and confirms that
+`OLLAMA_MODEL` appears in Ollama's installed-model list before accepting
+webhooks. Start Ollama and pull the model before starting the backend.
 
 ### `OLLAMA_HOST`
 
@@ -269,7 +277,7 @@ GitHub webhook
 Start it with:
 
 ```bash
-uvicorn app.main:create_production_app --factory --host 0.0.0.0 --port 8000
+.venv/bin/python -m uvicorn app.main:create_production_app --factory --host 0.0.0.0 --port 8000
 ```
 
 `create_production_app()` reads the GitHub App configuration, makes an
@@ -279,7 +287,56 @@ dependencies into `CandidateService`.
 
 By default it requires a DynamoDB table via `DYNAMODB_TABLE`. The table needs
 `pk` (string) as its partition key, `sk` (string) as its sort key, and an
-`issue-key-index` global secondary index with `issue_key` as its partition key.
+`issue-key-index` global secondary index with either `issue_key` or `issue-key`
+as its string partition key. The backend detects the deployed spelling at
+startup and writes both attributes for new candidate records. The index may
+use any projection; issue lookups fetch complete records from the table. Set
+`AWS_REGION` to the region containing that table (or configure Boto3 with
+`AWS_DEFAULT_REGION` or an AWS profile). Boto3 credentials must also be
+available to the backend. Keep AWS credentials out of source code and frontend
+environment variables.
+
+Before starting the backend with DynamoDB, verify credentials in the **same
+terminal** that will run Uvicorn. For a configured profile, set `AWS_PROFILE`
+and complete any required SSO login. Alternatively, use an IAM role or the
+standard `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables
+(plus `AWS_SESSION_TOKEN` when using temporary credentials). Check identity with
+`aws sts get-caller-identity`; this reports the identity, not the secret key.
+The backend now checks credentials, table read access, and the index key schema
+at startup, before it accepts webhook deliveries. Confirm the selected identity
+can also write to `DYNAMODB_TABLE` in `AWS_REGION`. GitHub App
+credentials are separate from AWS credentials.
+
+The candidate repository uses `GetItem` and `PutItem` on its table, and
+`Query` on `issue-key-index`. Its transactional candidate creation contains
+two `Put` actions, governed by `dynamodb:PutItem` permission. Grant the backend
+identity only those actions on the specific resources, for example:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CandidateTableItems",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem"],
+      "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/TABLE_NAME"
+    },
+    {
+      "Sid": "CandidateIssueIndex",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/TABLE_NAME/index/issue-key-index"
+    }
+  ]
+}
+```
+
+Replace `ACCOUNT_ID`, `TABLE_NAME`, and `REGION` with your deployment's
+values. Attach the policy to the IAM user or role actually used by the backend,
+not to the GitHub App. At startup the backend makes read-only `GetItem` and
+`Query` checks and fails before accepting webhooks if access or schema is
+wrong. This does not prove write access; validate that permission in IAM too.
 
 One example table setup is:
 

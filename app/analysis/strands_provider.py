@@ -1,9 +1,11 @@
 import os
 import logging
+import httpx
 
 from pydantic import ValidationError
 from strands import Agent
 from strands.models.ollama import OllamaModel
+from strands.types.exceptions import StructuredOutputException
 
 from .prompts import ANALYSIS_SYSTEM_PROMPT
 from .provider import AnalysisProviderResult
@@ -40,6 +42,26 @@ class StrandsAnalysisProvider:
             callback_handler=None,
         )
 
+    def check_ready(self) -> None:
+        """Check that the configured Ollama server exposes the selected model."""
+        try:
+            response = httpx.get(f"{self.host.rstrip('/')}/api/tags", timeout=3.0)
+            response.raise_for_status()
+            models = response.json().get("models", [])
+            if not isinstance(models, list):
+                raise ValueError("Invalid Ollama model listing")
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+            raise RuntimeError(
+                "Candidate Ollama server is unavailable. Start Ollama and verify OLLAMA_HOST."
+            ) from exc
+        names = {item.get("name") for item in models if isinstance(item, dict)}
+        configured = self.model_id if ":" in self.model_id else f"{self.model_id}:latest"
+        if self.model_id not in names and configured not in names:
+            raise RuntimeError(
+                f"Candidate Ollama model '{self.model_id}' is not installed. "
+                "Pull that model or set OLLAMA_MODEL to an installed model."
+            )
+
     async def generate(self, prompt: str) -> AnalysisProviderResult:
         """Use Ollama's native JSON-schema path through Strands 1.56.
 
@@ -60,7 +82,7 @@ class StrandsAnalysisProvider:
                 if response is None:
                     raise RuntimeError("Analysis provider returned no structured output")
                 return AnalysisProviderResult.model_validate(response)
-            except (ValueError, ValidationError) as exc:
+            except (StructuredOutputException, ValueError, ValidationError) as exc:
                 logger.warning("Ollama structured output validation failed: model=%s attempt=%s failure_type=%s",
                                self.model_id, attempt + 1, type(exc).__name__)
                 if attempt == 1:

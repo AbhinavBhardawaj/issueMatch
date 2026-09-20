@@ -281,6 +281,7 @@ def create_production_app() -> FastAPI:
         if not table_name:
             raise GitHubConfigurationError("DYNAMODB_TABLE is required when ISSUEMATCH_STORAGE=dynamodb")
         repository = DynamoDbCandidateRepository(table_name)
+        repository.check_read_access()
     else:
         raise GitHubConfigurationError("ISSUEMATCH_STORAGE must be 'dynamodb' or 'memory'")
 

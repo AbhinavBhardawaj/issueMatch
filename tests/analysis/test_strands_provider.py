@@ -1,4 +1,5 @@
 from unittest.mock import patch
+import httpx
 
 import pytest
 pytest.importorskip("strands")
@@ -6,6 +7,7 @@ pytest.importorskip("strands")
 from app.analysis.prompts import ANALYSIS_SYSTEM_PROMPT
 from app.analysis.provider import AnalysisProviderResult, EvidenceCitation
 from app.analysis.strands_provider import StrandsAnalysisProvider
+from strands.types.exceptions import StructuredOutputException
 
 
 class FakeAgent:
@@ -26,6 +28,29 @@ def make_provider():
     assert agent.call_args.kwargs["callback_handler"] is None
     assert "structured_output_model" not in agent.call_args.kwargs
     return provider
+
+
+def test_ollama_readiness_checks_configured_model():
+    provider = make_provider()
+    with patch("app.analysis.strands_provider.httpx.get") as get:
+        get.return_value.json.return_value = {"models": [{"name": "test-model:latest"}]}
+        provider.check_ready()
+    get.assert_called_once_with("http://localhost:11434/api/tags", timeout=3.0)
+
+
+def test_ollama_readiness_rejects_missing_model():
+    provider = make_provider()
+    with patch("app.analysis.strands_provider.httpx.get") as get:
+        get.return_value.json.return_value = {"models": []}
+        with pytest.raises(RuntimeError, match="not installed"):
+            provider.check_ready()
+
+
+def test_ollama_readiness_rejects_unreachable_server():
+    provider = make_provider()
+    with patch("app.analysis.strands_provider.httpx.get", side_effect=httpx.ConnectError("offline")):
+        with pytest.raises(RuntimeError, match="server is unavailable"):
+            provider.check_ready()
 
 
 @pytest.mark.asyncio
@@ -76,3 +101,27 @@ async def test_schema_failure_retries_once_without_parsing_model_text():
     assert result.confidence == .5
     assert len(agent.prompts) == 2
     assert "Do not use percentages" in agent.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_strands_structured_output_failure_retries_once():
+    provider = make_provider()
+
+    class RetryAgent:
+        def __init__(self):
+            self.calls = 0
+
+        async def structured_output_async(self, output_model, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                raise StructuredOutputException("invalid structured response")
+            return AnalysisProviderResult(
+                decision="REVISION_REQUIRED", confidence=.5,
+                revision_feedback="Explain the rate-limit test.",
+            )
+
+    agent = RetryAgent()
+    provider._agent = agent
+    result = await provider.generate("test prompt")
+    assert result.decision.value == "REVISION_REQUIRED"
+    assert agent.calls == 2

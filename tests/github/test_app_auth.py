@@ -30,3 +30,36 @@ class ProductionCompositionTests(unittest.TestCase):
             from app.main import create_production_app
             app = create_production_app()
         self.assertIn("/webhooks/github", app.openapi()["paths"])
+
+    def test_dynamodb_production_factory_uses_documented_aws_region(self):
+        from tests.fakes import FakeAnalysisService
+        fake_factory = types.ModuleType("app.analysis.factory")
+        fake_factory.create_analysis_service = FakeAnalysisService
+        environment = {
+            "GITHUB_APP_ID": "1", "GITHUB_PRIVATE_KEY": "unused",
+            "GITHUB_WEBHOOK_SECRET": "secret", "ISSUEMATCH_STORAGE": "dynamodb",
+            "DYNAMODB_TABLE": "candidates", "AWS_REGION": "ap-south-1",
+        }
+        with patch.dict(os.environ, environment, clear=True), \
+             patch.dict(sys.modules, {"app.analysis.factory": fake_factory}), \
+             patch("boto3.Session") as create_session:
+            from app.main import create_production_app
+            app = create_production_app()
+        create_session.return_value.client.assert_called_once_with("dynamodb", region_name="ap-south-1")
+        create_session.return_value.client.return_value.get_item.assert_called_once()
+        self.assertIn("/webhooks/github", app.openapi()["paths"])
+
+    def test_dynamodb_production_factory_rejects_missing_aws_credentials(self):
+        from app.candidates.repository import DynamoDbConfigurationError
+        environment = {
+            "GITHUB_APP_ID": "1", "GITHUB_PRIVATE_KEY": "unused",
+            "GITHUB_WEBHOOK_SECRET": "secret", "ISSUEMATCH_STORAGE": "dynamodb",
+            "DYNAMODB_TABLE": "candidates", "AWS_REGION": "ap-south-1",
+        }
+        with patch.dict(os.environ, environment, clear=True), \
+             patch("boto3.Session") as create_session:
+            create_session.return_value.get_credentials.return_value = None
+            from app.main import create_production_app
+            with self.assertRaisesRegex(DynamoDbConfigurationError, "AWS credentials"):
+                create_production_app()
+        create_session.return_value.client.assert_not_called()

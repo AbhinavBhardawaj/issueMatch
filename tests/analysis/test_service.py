@@ -56,6 +56,150 @@ async def test_relevant_repository_approach_passes():
 
 
 @pytest.mark.asyncio
+async def test_repository_prefixed_citation_is_verified_without_retry():
+    class CountingProvider(FakeAnalysisProvider):
+        def __init__(self, response):
+            super().__init__(response)
+            self.calls = 0
+
+        async def generate(self, prompt):
+            self.calls += 1
+            return await super().generate(prompt)
+
+    citation = EvidenceCitation(path="acme/demo/src/auth/session.py",
+                                excerpt="def timeout(): pass", claim="timeout location")
+    provider = CountingProvider(output(evidence=[citation]))
+    analysis = await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert analysis.decision is AnalysisDecision.PASS
+    assert analysis.evidence[0].startswith("src/auth/session.py:L1")
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_inexact_citation_gets_one_bounded_repair_attempt():
+    class RepairingProvider:
+        def __init__(self):
+            self.prompts = []
+
+        async def generate(self, prompt):
+            self.prompts.append(prompt)
+            citation = EvidenceCitation(
+                path="src/auth/session.py",
+                excerpt="unseen" if len(self.prompts) == 1 else "def timeout(): pass",
+                claim="timeout location",
+            )
+            return output(evidence=[citation])
+
+    provider = RepairingProvider()
+    analysis = await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert analysis.decision is AnalysisDecision.PASS
+    assert len(provider.prompts) == 2
+    assert "could not be verified" in provider.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_reasonless_revision_gets_one_reconsideration():
+    class ReconsideringProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return AnalysisProviderResult(decision="REVISION_REQUIRED", confidence=.4)
+            return output()
+
+    provider = ReconsideringProvider()
+    analysis = await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert analysis.decision is AnalysisDecision.PASS
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_reasonless_revision_is_not_posted_after_failed_reconsideration():
+    class ReasonlessProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, prompt):
+            self.calls += 1
+            return AnalysisProviderResult(decision="REVISION_REQUIRED", confidence=.4)
+
+    provider = ReasonlessProvider()
+    with pytest.raises(ValueError, match="revision lacked actionable feedback"):
+        await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_reasonless_rejection_gets_one_reconsideration():
+    class ReconsideringProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return AnalysisProviderResult(decision="REJECT", confidence=.4,
+                                              issues=["   "])
+            return AnalysisProviderResult(decision="REJECT", confidence=.5,
+                                          issues=["The proposed change targets an unrelated module."])
+
+    provider = ReconsideringProvider()
+    analysis = await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert analysis.decision is AnalysisDecision.REJECT
+    assert analysis.issues == ["The proposed change targets an unrelated module."]
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_citation_retry_then_reasonless_revision_is_repaired():
+    """Regression for a model changing PASS to empty REVISION_REQUIRED."""
+    class SequencedProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return output(evidence=[EvidenceCitation(
+                    path="src/auth/session.py", excerpt="not in supplied source",
+                    claim="timeout location",
+                )])
+            if self.calls == 2:
+                return AnalysisProviderResult(decision="REVISION_REQUIRED", confidence=.5)
+            return output()
+
+    provider = SequencedProvider()
+    analysis = await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert analysis.decision is AnalysisDecision.PASS
+    assert provider.calls == 3
+    assert analysis.evidence[0].startswith("src/auth/session.py:L1")
+
+
+@pytest.mark.asyncio
+async def test_citation_retry_then_persistent_reasonless_revision_fails_explicitly():
+    class SequencedProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return output(evidence=[EvidenceCitation(
+                    path="src/auth/session.py", excerpt="not in supplied source",
+                    claim="timeout location",
+                )])
+            return AnalysisProviderResult(decision="REVISION_REQUIRED", confidence=.5)
+
+    provider = SequencedProvider()
+    with pytest.raises(ValueError, match="Provider revision lacked actionable feedback") as error:
+        await DefaultAnalysisService(provider).analyze(make_candidate(), make_context())
+    assert type(error.value) is ValueError
+    assert provider.calls == 3
+
+
+@pytest.mark.asyncio
 async def test_revision_feedback_survives():
     analysis = await DefaultAnalysisService(FakeAnalysisProvider(output(AnalysisDecision.REVISION_REQUIRED, evidence=[]))).analyze(make_candidate(), make_context())
     assert analysis.decision is AnalysisDecision.REVISION_REQUIRED

@@ -31,9 +31,9 @@ class ApproachAnalysis(BaseModel):
     def validate_decision_content(self) -> "ApproachAnalysis":
         if self.decision is AnalysisDecision.PASS and (not self.evidence or self.confidence <= 0):
             raise ValueError("PASS analyses must include evidence and positive confidence")
-        if self.decision is AnalysisDecision.REVISION_REQUIRED and not self.revision_feedback:
+        if self.decision is AnalysisDecision.REVISION_REQUIRED and not self.revision_feedback.strip():
             raise ValueError("REVISION_REQUIRED analyses need revision_feedback")
-        if self.decision is AnalysisDecision.REJECT and not (self.issues or self.recommendation):
+        if self.decision is AnalysisDecision.REJECT and not (any(item.strip() for item in self.issues) or self.recommendation.strip()):
             raise ValueError("REJECT analyses need concrete issues or a recommendation")
         return self
 

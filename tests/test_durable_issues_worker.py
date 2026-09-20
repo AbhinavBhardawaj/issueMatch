@@ -10,8 +10,65 @@ from app.storage.delivery_store import SQLiteDeliveryStore, DeliveryState
 from app.storage.sqlite import get_db_connection
 from app.services.worker import DurableWebhookWorker
 from app.github.events import GitHubIssueAssignmentEvent
+from app.candidates.repository import InMemoryCandidateRepository
+from app.candidates.service import CandidateService
+from app.models.candidate import CandidateStatus
+from tests.fakes import FakeAnalysisService, FakeGitHubClient
 
 WEBHOOK_SECRET = "test-secret-issues-123"
+
+
+@pytest.mark.asyncio
+async def test_comment_worker_retry_resumes_candidate_after_storage_failure(tmp_path):
+    class FailingOnceRepository(InMemoryCandidateRepository):
+        def __init__(self):
+            super().__init__()
+            self.failed_once = False
+
+        async def update(self, candidate):
+            if candidate.status is CandidateStatus.ACCEPTED and not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("transient candidate write failure")
+            return await super().update(candidate)
+
+    db_path = str(tmp_path / "comment_retry.db")
+    delivery_store = SQLiteDeliveryStore(db_path)
+    repository = FailingOnceRepository()
+    github = FakeGitHubClient()
+    service = CandidateService(repository, lambda _: github, FakeAnalysisService())
+    app = create_application(
+        webhook_secret=WEBHOOK_SECRET, candidate_service=service,
+        delivery_store=delivery_store,
+        config=AppRuntimeConfig(db_path=db_path, auto_start_worker=False),
+    )
+    payload = {
+        "action": "created",
+        "repository": {"name": "demo", "owner": {"login": "acme"}, "default_branch": "main"},
+        "issue": {"number": 7, "title": "Session timeout"},
+        "comment": {"id": 901, "body": "I'd like to work on this. I'll modify src/auth/session.py and add tests.",
+                    "user": {"login": "alice", "id": 9}},
+        "installation": {"id": 1},
+    }
+    body = json.dumps(payload).encode()
+    response = TestClient(app).post(
+        "/webhooks/github", content=body,
+        headers=make_signed_headers(body, "retry-comment-001", event="issue_comment"),
+    )
+    assert response.status_code == 202
+
+    worker = DurableWebhookWorker(delivery_store=delivery_store, candidate_service=service)
+    assert await worker.process_one() is True
+    assert (await delivery_store.get_job("retry-comment-001"))["state"] == DeliveryState.PENDING.value
+    assert github.comments == []
+
+    async with await get_db_connection(db_path) as db:
+        await db.execute("UPDATE webhook_jobs SET available_at = 0 WHERE delivery_id = ?",
+                         ("retry-comment-001",))
+        await db.commit()
+    assert await worker.process_one() is True
+    assert (await delivery_store.get_job("retry-comment-001"))["state"] == DeliveryState.COMPLETED.value
+    assert len(github.comments) == 1
+    assert "Status - ACCEPTED" in github.comments[0]
 
 
 def make_signed_headers(body: bytes, delivery_id: str, event: str = "issues") -> dict:

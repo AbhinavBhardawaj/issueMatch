@@ -9,7 +9,7 @@ from app.models.context import RepositoryAnalysisContext
 
 from .criteria import check_acceptance_criteria
 from .provider import AnalysisProvider, AnalysisProviderResult
-from .verifier import derive_issue_grounded_evidence, verify_evidence
+from .verifier import derive_issue_grounded_evidence, normalize_evidence_path, verify_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +105,51 @@ class DefaultAnalysisService:
                         candidate.candidate_id, len(coverage.covered), len(coverage.criteria), analysis.decision)
             return analysis
 
-        prompt = self._build_prompt(candidate, context)
-        provider_result = AnalysisProviderResult.model_validate(await self._provider.generate(prompt))
-        verified_evidence = verify_evidence(provider_result.evidence, context)
+        base_prompt = self._build_prompt(candidate, context)
         supplied_paths = {file.path for file in (*context.code_context.file_contents,
                                                  *context.code_context.test_files)}
-        absent_citations = [item.path for item in provider_result.evidence if item.path not in supplied_paths]
+        provider_result = AnalysisProviderResult.model_validate(
+            await self._provider.generate(base_prompt)
+        )
+        reason_retry_used = False
+        citation_retry_used = False
+        while True:
+            verified_evidence = verify_evidence(provider_result.evidence, context)
+            absent_citations = [item.path for item in provider_result.evidence
+                                if normalize_evidence_path(item.path, context) not in supplied_paths]
+            missing_revision = (provider_result.decision is AnalysisDecision.REVISION_REQUIRED
+                                and not (provider_result.revision_feedback.strip()
+                                         or any(item.strip() for item in provider_result.issues)
+                                         or any(item.strip() for item in provider_result.missing_requirements)))
+            missing_rejection = (provider_result.decision is AnalysisDecision.REJECT
+                                 and not (any(item.strip() for item in provider_result.issues)
+                                          or provider_result.recommendation.strip()))
+            invalid_pass_citation = (provider_result.decision is AnalysisDecision.PASS
+                                     and bool(provider_result.evidence)
+                                     and (bool(absent_citations) or not verified_evidence))
+            if (missing_revision or missing_rejection) and not reason_retry_used:
+                reason_retry_used = True
+                correction = (
+                    "\nYour previous decision had no concrete reason. Re-evaluate "
+                    "against the issue and supplied code. REVISION_REQUIRED must "
+                    "include actionable revision_feedback or concrete issues. "
+                    "REJECT must include concrete issues or a recommendation. "
+                    "Choose PASS only with positive confidence and grounded evidence."
+                )
+            elif invalid_pass_citation and not citation_retry_used:
+                citation_retry_used = True
+                correction = (
+                    "\nYour previous PASS citations could not be verified. Re-evaluate the "
+                    "decision and cite only a supplied relative path with a short "
+                    "verbatim excerpt from its FILE CONTENT. If you cannot support "
+                    "PASS with the supplied code, choose REVISION_REQUIRED or REJECT "
+                    "with a concrete reason."
+                )
+            else:
+                break
+            provider_result = AnalysisProviderResult.model_validate(
+                await self._provider.generate(base_prompt + correction)
+            )
         result = provider_result.model_dump()
 
         repo_identifiers = {
@@ -123,8 +162,7 @@ class DefaultAnalysisService:
         # proposal with zero confidence, a reasonless rejection, or a bogus
         # excerpt from a real file. In that narrow case independently ground
         # the checklist in real source locations. Never accept invented paths.
-        invalid_rejection = (provider_result.decision is AnalysisDecision.REJECT
-                             and not provider_result.issues and not provider_result.recommendation)
+        invalid_rejection = missing_rejection
         inconclusive_zero = (provider_result.confidence == 0 and (
             provider_result.decision is AnalysisDecision.PASS or
             (provider_result.decision is AnalysisDecision.REVISION_REQUIRED
@@ -156,6 +194,11 @@ class DefaultAnalysisService:
             )
             return ApproachAnalysis.model_validate(result)
 
+        if invalid_rejection:
+            raise ValueError("Provider rejection lacked concrete reasons")
+        if missing_revision:
+            raise ValueError("Provider revision lacked actionable feedback")
+
         if provider_result.decision is AnalysisDecision.PASS:
             if absent_citations:
                 if invented_citations:
@@ -176,8 +219,8 @@ class DefaultAnalysisService:
                 raise ValueError("Provider PASS lacked relevant repository grounding")
         result["evidence"] = verified_evidence
 
-        if provider_result.decision is AnalysisDecision.REVISION_REQUIRED and not provider_result.revision_feedback:
-            details = provider_result.issues + provider_result.missing_requirements
+        if provider_result.decision is AnalysisDecision.REVISION_REQUIRED and not provider_result.revision_feedback.strip():
+            details = [item for item in provider_result.issues + provider_result.missing_requirements if item.strip()]
             if details:
                 result["revision_feedback"] = " ".join(details[:3])
 

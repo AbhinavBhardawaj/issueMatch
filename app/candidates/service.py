@@ -19,6 +19,18 @@ from app.models.context import RepositoryAnalysisContext
 
 logger = logging.getLogger(__name__)
 
+_SAFE_ANALYSIS_FAILURES = {
+    "Analysis provider returned invalid structured output",
+    "Provider cited a repository file absent from supplied context",
+    "Provider PASS cited a repository file absent from supplied context",
+    "Provider PASS cited no verifiable repository source",
+    "Provider PASS lacked relevant repository grounding",
+    "Provider PASS had zero confidence",
+    "Complete checklist lacked relevant repository grounding",
+    "Provider revision lacked actionable feedback",
+    "Provider rejection lacked concrete reasons",
+}
+
 
 class ProcessingOutcome(str, Enum):
     IGNORED = "IGNORED"
@@ -100,6 +112,43 @@ class CandidateService:
             return CandidateProcessingResult(ProcessingOutcome.WAITING, candidate=candidate, detail="another candidate is recommended or assigned")
         return await self._evaluate_candidate(candidate, event.installation_id, event.repository_default_branch)
 
+    async def resume_incomplete_issue_comment(self, event: GitHubIssueCommentEvent) -> CandidateProcessingResult:
+        """Resume only a queued retry of the *same* partially saved delivery.
+
+        Ordinary GitHub redeliveries still use process_issue_comment and are
+        ignored. The durable worker calls this only after an earlier attempt
+        failed, so a storage error after candidate creation does not turn its
+        next attempt into a no-op duplicate.
+        """
+        candidate = await self._repository.get_for_delivery(event.delivery_id)
+        if candidate is None:
+            return await self.process_issue_comment(event)
+        if (candidate.comment_id != event.comment_id
+                or candidate.repository_owner != event.repository_owner
+                or candidate.repository_name != event.repository_name
+                or candidate.issue_number != event.issue_number):
+            raise ValueError("Delivery candidate does not match webhook event")
+        if candidate.status not in {
+            CandidateStatus.APPROACH_SUBMITTED, CandidateStatus.ANALYZING,
+            CandidateStatus.CONTEXT_PENDING, CandidateStatus.ANALYSIS_PENDING,
+        }:
+            logger.info("Completed or ineligible candidate retry ignored: candidate=%s status=%s",
+                        candidate.candidate_id, candidate.status.value)
+            return CandidateProcessingResult(ProcessingOutcome.DUPLICATE, candidate=candidate,
+                                             detail="candidate already processed")
+        if candidate.status is CandidateStatus.APPROACH_SUBMITTED:
+            state = await self._get_issue_state(candidate.repository_owner, candidate.repository_name,
+                                                candidate.issue_number)
+            if candidate.priority is not None and state.next_priority <= candidate.priority:
+                await self._save_issue_state(state.model_copy(update={
+                    "next_priority": candidate.priority + 1,
+                    "status": IssueCandidateState.EVALUATING_CANDIDATES,
+                    "updated_at": datetime.now(timezone.utc),
+                }))
+        logger.info("Resuming incomplete candidate delivery: candidate=%s", candidate.candidate_id)
+        return await self._evaluate_candidate(candidate, event.installation_id,
+                                              event.repository_default_branch)
+
     async def process_issue_assignment(self, event: GitHubIssueAssignmentEvent) -> CandidateProcessingResult:
         """Track assignment changes and resume ordered evaluation after unassignment."""
         if await self._repository.has_delivery(event.delivery_id):
@@ -158,7 +207,20 @@ class CandidateService:
         try:
             analysis = ApproachAnalysis.model_validate(await self._analysis.analyze(candidate, context))
         except Exception as exc:
-            logger.error("Analysis service failed: candidate=%s failure_type=%s", candidate.candidate_id, type(exc).__name__)
+            failure_reason = str(exc) if type(exc) is ValueError and str(exc) in _SAFE_ANALYSIS_FAILURES else type(exc).__name__
+            if hasattr(exc, "errors") and type(exc).__name__ == "ValidationError":
+                # Log schema locations and rule types only. Pydantic's full
+                # messages/input can contain untrusted source or credentials.
+                entries = exc.errors(include_input=False, include_context=False)
+                schema = getattr(exc, "title", "")
+                schema = schema if schema in {"ApproachAnalysis", "AnalysisProviderResult", "EvidenceCitation"} else "Schema"
+                fields = ";".join(
+                    f"{'.'.join(str(part) for part in entry.get('loc', ())[:3]) or 'model'}:{entry.get('type', 'invalid')}"
+                    for entry in entries[:3]
+                ) or "model:invalid"
+                failure_reason = f"{schema}/{fields}"
+            logger.error("Analysis service failed: candidate=%s failure_type=%s reason=%s",
+                         candidate.candidate_id, type(exc).__name__, failure_reason)
             failed = await self._repository.update_status(candidate.candidate_id, CandidateStatus.FAILED)
             try:
                 await post_analysis_unavailable(client, failed)

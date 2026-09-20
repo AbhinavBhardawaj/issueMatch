@@ -1,4 +1,6 @@
 import unittest
+from app.analysis.provider import AnalysisProviderResult, EvidenceCitation
+from app.analysis.service import DefaultAnalysisService
 from app.candidates.repository import InMemoryCandidateRepository
 from app.candidates.service import CandidateService, ProcessingOutcome
 from app.github.events import GitHubIssueAssignmentEvent
@@ -27,6 +29,99 @@ def approach_event(delivery, username, comment="I'd like to work on this. I'll m
     current = event(delivery, comment)
     return current.model_copy(update={"comment_author": username, "comment_id": comment_id or abs(hash(delivery))})
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_repairs_issue_priority_after_state_write_failure(self):
+        class FailingOnceRepository(InMemoryCandidateRepository):
+            def __init__(self):
+                super().__init__()
+                self.failed_once = False
+
+            async def update_issue_state(self, state):
+                if not self.failed_once:
+                    self.failed_once = True
+                    raise RuntimeError("transient issue-state write failure")
+                return await super().update_issue_state(state)
+
+        repository = FailingOnceRepository()
+        github = FakeGitHubClient()
+        service = CandidateService(repository, lambda _: github, FakeAnalysisService())
+        comment = event("retry-after-state-write")
+
+        with self.assertRaisesRegex(RuntimeError, "transient issue-state write failure"):
+            await service.process_issue_comment(comment)
+        stored = await repository.get_for_delivery(comment.delivery_id)
+        self.assertEqual(stored.status, CandidateStatus.APPROACH_SUBMITTED)
+
+        result = await service.resume_incomplete_issue_comment(comment)
+        self.assertEqual(result.candidate.status, CandidateStatus.ACCEPTED)
+        state = await repository.get_issue_state("acme", "demo", 7)
+        self.assertEqual(state.next_priority, 2)
+        self.assertEqual(len(github.comments), 1)
+
+    async def test_retry_recovers_candidate_after_analysis_write_failure(self):
+        class FailingOnceRepository(InMemoryCandidateRepository):
+            def __init__(self):
+                super().__init__()
+                self.failed_once = False
+
+            async def update(self, candidate):
+                if candidate.status is CandidateStatus.ACCEPTED and not self.failed_once:
+                    self.failed_once = True
+                    raise RuntimeError("transient candidate write failure")
+                return await super().update(candidate)
+
+        repository = FailingOnceRepository()
+        github = FakeGitHubClient()
+        analyzer = FakeAnalysisService()
+        service = CandidateService(repository, lambda _: github, analyzer)
+        comment = event("retry-after-write")
+
+        with self.assertRaisesRegex(RuntimeError, "transient candidate write failure"):
+            await service.process_issue_comment(comment)
+        stored = await repository.get_for_delivery(comment.delivery_id)
+        self.assertEqual(stored.status, CandidateStatus.ANALYZING)
+        self.assertEqual((await service.process_issue_comment(comment)).outcome,
+                         ProcessingOutcome.DUPLICATE)
+
+        recovered = await service.resume_incomplete_issue_comment(comment)
+        self.assertEqual(recovered.outcome, ProcessingOutcome.ANALYZED)
+        self.assertEqual(recovered.candidate.status, CandidateStatus.ACCEPTED)
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("Status - ACCEPTED", github.comments[0])
+        self.assertEqual((await service.resume_incomplete_issue_comment(comment)).outcome,
+                         ProcessingOutcome.DUPLICATE)
+        self.assertEqual(len(github.comments), 1)
+
+    async def test_citation_repair_that_changes_decision_still_posts_valid_result(self):
+        class SequencedProvider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, prompt):
+                self.calls += 1
+                if self.calls == 2:
+                    return AnalysisProviderResult(decision=AnalysisDecision.REVISION_REQUIRED,
+                                                  confidence=0.5)
+                return AnalysisProviderResult(
+                    decision=AnalysisDecision.PASS, confidence=0.8,
+                    evidence=[EvidenceCitation(
+                        path="src/auth/session.py",
+                        excerpt="missing source" if self.calls == 1 else "def timeout(): pass",
+                        claim="The timeout implementation is in this file.",
+                    )],
+                )
+
+        github = FakeGitHubClient()
+        provider = SequencedProvider()
+        service = CandidateService(InMemoryCandidateRepository(), lambda _: github,
+                                   DefaultAnalysisService(provider))
+        result = await service.process_issue_comment(event("citation-repair-flow"))
+
+        self.assertEqual(result.outcome, ProcessingOutcome.ANALYZED)
+        self.assertEqual(result.candidate.status, CandidateStatus.ACCEPTED)
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("Status - ACCEPTED", github.comments[0])
+
     async def test_issue_only_root_file_reaches_analysis_service(self):
         class DemoClient(FakeGitHubClient):
             async def get_issue(self, *args):
@@ -70,6 +165,26 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await service.process_issue_comment(event("invalid-provider"))).outcome,
                          ProcessingOutcome.DUPLICATE)
         self.assertEqual(len(github.comments), 1)
+
+    async def test_validation_log_reports_rule_without_echoing_input(self):
+        import logging
+        from pydantic import ValidationError
+
+        class InvalidProvider:
+            async def analyze(self, candidate, context):
+                raise ValidationError.from_exception_data(
+                    "AnalysisProviderResult",
+                    [{"type": "string_type", "loc": ("evidence", 0, "path"),
+                      "input": "private-source-content"}],
+                )
+
+        service = CandidateService(InMemoryCandidateRepository(),
+                                   lambda _: FakeGitHubClient(), InvalidProvider())
+        with self.assertLogs("app.candidates.service", level=logging.ERROR) as captured:
+            result = await service.process_issue_comment(event("validation-log"))
+        self.assertEqual(result.outcome, ProcessingOutcome.FAILED)
+        self.assertIn("evidence.0.path:string_type", captured.output[0])
+        self.assertNotIn("private-source-content", captured.output[0])
 
     async def test_claim_only_and_ordered_candidates(self):
         repository = InMemoryCandidateRepository(); analyzer = DecisionAnalysis({"bob": AnalysisDecision.REJECT, "carol": AnalysisDecision.PASS, "dana": AnalysisDecision.PASS})
