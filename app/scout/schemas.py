@@ -1,5 +1,5 @@
 from typing import Literal, Any
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ScoutEvidenceDraft(BaseModel):
@@ -61,6 +61,23 @@ class ScoutFindingDraft(BaseModel):
         "other",
     ]
     expected_behavior_evidence: str
+
+    @field_validator("expected_behavior_basis", mode="before")
+    @classmethod
+    def normalize_expected_behavior_basis(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v_lower = v.strip().lower()
+            if v_lower in ("comment", "comments", "doc", "docs", "docstring", "readme"):
+                return "documentation"
+            if v_lower in ("code", "implementation", "type", "types", "syntax"):
+                return "language_semantics"
+            if v_lower in ("contract", "spec", "specification", "interface"):
+                return "api_contract"
+            if v_lower in ("invariant", "architecture", "design"):
+                return "repository_invariant"
+            if v_lower in ("tests", "unit_test", "integration_test"):
+                return "test"
+        return v
 
     # Scope & absence claims
     claim_scope: Literal["local", "cross_file", "repository_wide"] = "local"

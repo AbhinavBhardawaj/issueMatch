@@ -7,7 +7,14 @@ from app.verifier.agent import LLMProvider
 from app.github.events import GitHubPushEvent
 from app.scout.models import ScoutContext
 from app.scout.schemas import ScoutResponse
-from app.scout.prompts import SYSTEM_PROMPT, build_scout_prompt
+from app.scout.prompts import (
+    SYSTEM_PROMPT,
+    build_scout_prompt,
+    estimate_serialized_request_size,
+    resolve_max_scout_request_bytes,
+    MAX_SCOUT_REQUEST_BYTES,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,51 +39,60 @@ class ScoutAgent:
         self,
         event: GitHubPushEvent,
         context: ScoutContext,
+        batch_index: int = 1,
+        total_batches: int = 1,
     ) -> ScoutResponse:
-        user_prompt = build_scout_prompt(event, context)
+        target_budget = resolve_max_scout_request_bytes()
+        raw_provider = getattr(self.llm_provider, "provider_name", "")
+        raw_model = getattr(self.llm_provider, "model_name", "")
+        provider_name = raw_provider.upper() if isinstance(raw_provider, str) else ""
+        model_name = raw_model.lower() if isinstance(raw_model, str) else ""
+        if "GROQ" in provider_name or "qwen" in model_name:
+            target_budget = min(target_budget, 9_200)
 
-        t0 = time.perf_counter()
-        try:
-            raw_response = await self.llm_provider.complete(SYSTEM_PROMPT, user_prompt)
-        except Exception as exc:
-            err_msg = str(exc) or type(exc).__name__
-            raise MalformedScoutResponse(f"Scout LLM invocation failed: {err_msg}") from exc
-        latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        user_prompt = build_scout_prompt(event, context, max_request_bytes=target_budget)
+        request_bytes = estimate_serialized_request_size(user_prompt, SYSTEM_PROMPT)
 
-        # Strip markdown fences if present
-        cleaned = raw_response.strip()
-        match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL)
-        if match:
-            cleaned = match.group(1).strip()
+        # Layer 2 Guard: Never knowingly send an outbound request exceeding our internal safety budget
+        if request_bytes > target_budget:
+            raise MalformedScoutResponse(
+                f"Scout outbound request envelope ({request_bytes} bytes) exceeds internal safety budget ({target_budget} bytes)"
+            )
 
-        try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
-                cleaned_findings = []
-                for f in parsed["findings"]:
-                    if isinstance(f, dict):
-                        f_copy = dict(f)
-                        if not f_copy.get("file"):
-                            f_copy["file"] = f_copy.get("file_path") or f_copy.get("path")
-                            if not f_copy.get("file") and f_copy.get("evidence"):
-                                first_ev = f_copy["evidence"][0]
-                                if isinstance(first_ev, dict):
-                                    f_copy["file"] = first_ev.get("file")
-                        if isinstance(f_copy.get("severity"), str):
-                            f_copy["severity"] = f_copy["severity"].lower()
-                        elif not f_copy.get("severity"):
-                            f_copy["severity"] = "medium"
-                        cleaned_findings.append(f_copy)
-                    else:
-                        cleaned_findings.append(f)
-                parsed = {"findings": cleaned_findings}
-            response = ScoutResponse.model_validate(parsed)
-        except ValidationError as exc:
-            raise MalformedScoutResponse(f"Scout response failed schema validation: {str(exc)}") from exc
-        except Exception as exc:
-            raise MalformedScoutResponse(f"Failed to parse Scout JSON: {str(exc)}") from exc
+        last_error = None
+        for attempt in range(2):
+            t0 = time.perf_counter()
+            try:
+                raw_response = await self.llm_provider.complete(SYSTEM_PROMPT, user_prompt)
+            except Exception as exc:
+                raise MalformedScoutResponse(f"Scout LLM invocation failed: {str(exc)}") from exc
+            latency_ms = round((time.perf_counter() - t0) * 1000, 2)
 
-        # Strictly enforce maximum AI drafts limit (max 8)
+            # Strip markdown fences if present
+            cleaned = raw_response.strip()
+            match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL)
+            if match:
+                cleaned = match.group(1).strip()
+
+            try:
+                response = ScoutResponse.model_validate_json(cleaned)
+                break
+            except ValidationError as exc:
+                last_error = MalformedScoutResponse(f"Scout response failed schema validation: {str(exc)}")
+            except Exception as exc:
+                last_error = MalformedScoutResponse(f"Failed to parse Scout JSON: {str(exc)}")
+
+            if attempt == 0:
+                logger.warning(
+                    "scout_malformed_response_retrying",
+                    extra={"error": str(last_error), "attempt": attempt + 1},
+                )
+                continue
+        else:
+            if last_error:
+                raise last_error
+
+        # Strictly enforce maximum AI drafts limit (max 8 per batch)
         if len(response.findings) > 8:
             raise MalformedScoutResponse(
                 f"Scout returned {len(response.findings)} drafts, exceeding the maximum limit of 8"
@@ -94,6 +110,18 @@ class ScoutAgent:
                 "commit_sha": event.after_sha,
                 "draft_count": len(response.findings),
                 "result_status": "SUCCESS",
+                "scout_batch_count": total_batches,
+                "scout_batch_index": batch_index,
+                "source_file_count": len(context.files),
+                "test_file_count": len(context.test_files),
+                "changed_file_count": len(context.changed_paths),
+                "raw_context_bytes": context.total_context_bytes,
+                "user_prompt_bytes": len(user_prompt.encode("utf-8")),
+                "system_prompt_bytes": len(SYSTEM_PROMPT.encode("utf-8")),
+                "request_bytes": request_bytes,
+                "prompt_budget_bytes": target_budget,
+                "context_completeness": context.context_completeness.value,
+                "partial_reasons": context.partial_reasons,
             },
         )
 

@@ -2,11 +2,13 @@ import os
 import httpx
 from typing import Optional
 
+from app.analysis.provider import AnalysisProviderResult
+
 
 class NvidiaAnalysisProvider:
     """
     Analysis provider backed by NVIDIA NIM cloud API.
-    Conforms to AnalysisProvider protocol (async def generate(self, prompt: str) -> str).
+    Conforms to AnalysisProvider protocol (async def generate(self, prompt: str) -> AnalysisProviderResult).
     """
 
     def __init__(
@@ -22,7 +24,7 @@ class NvidiaAnalysisProvider:
         if not self.api_key:
             raise ValueError("NVIDIA_API_KEYS not configured")
 
-    async def generate(self, prompt: str) -> str:
+    async def generate(self, prompt: str) -> AnalysisProviderResult:
         """Generate an analysis response from NVIDIA NIM API."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -54,4 +56,4 @@ class NvidiaAnalysisProvider:
             if not result:
                 raise ValueError("NVIDIA NIM provider returned an empty response")
 
-            return result
+            return AnalysisProviderResult.model_validate_json(result)
