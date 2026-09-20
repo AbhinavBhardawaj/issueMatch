@@ -21,14 +21,21 @@ import os
 import sys
 import asyncio
 import sqlite3
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load local .env if present; environment variables take precedence
-load_dotenv()
+# Explicitly resolve repository root .env; OS environment variables still take precedence (override=False)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ENV = PROJECT_ROOT / ".env"
+if PROJECT_ENV.is_file():
+    load_dotenv(dotenv_path=PROJECT_ENV, override=False)
+else:
+    load_dotenv(override=False)
 
 # Ensure project root is in sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.storage.sqlite import get_default_db_path
 from app.github.app_auth import GitHubAppConfig, GitHubAppAuthenticator, GitHubConfigurationError
 from app.infrastructure.llm_router import (
     create_scout_provider,
@@ -53,16 +60,28 @@ async def run_diagnostics() -> bool:
         if not passed:
             all_passed = False
 
+    # 0. Root Environment Configuration
+    if PROJECT_ENV.is_file():
+        check("Root environment configuration loaded", True, f"{PROJECT_ENV.name}")
+    else:
+        check("Root environment configuration loaded", True, "from system environment")
+
+    run_live = os.environ.get("RUN_LIVE_SCOUT_E2E", "").strip()
+    if run_live == "1":
+        check("RUN_LIVE_SCOUT_E2E enabled", True, "RUN_LIVE_SCOUT_E2E=1")
+    else:
+        check("RUN_LIVE_SCOUT_E2E enabled", False, "RUN_LIVE_SCOUT_E2E != 1 (live tests will skip)")
+
     # 1. GitHub App Credentials
     authenticator = None
     try:
         app_config = GitHubAppConfig.from_environment()
         authenticator = GitHubAppAuthenticator(app_config)
-        check("GitHub App Configuration", True, f"App ID {app_config.app_id}")
+        check("GitHub App configuration constructed", True, f"App ID {app_config.app_id}")
     except GitHubConfigurationError as exc:
-        check("GitHub App Configuration", False, f"Failed to load: {exc}")
+        check("GitHub App configuration constructed", False, f"Failed to load: {exc}")
     except Exception as exc:
-        check("GitHub App Configuration", False, f"Failed to load: {exc}")
+        check("GitHub App configuration constructed", False, f"Failed to load: {exc}")
 
     # 2. Installation Client & Token
     inst_id_str = os.environ.get("LIVE_E2E_INSTALLATION_ID", "").strip()
@@ -133,33 +152,37 @@ async def run_diagnostics() -> bool:
     try:
         scout_prov = create_scout_provider()
         if isinstance(scout_prov, MultiLLMProvider) and len(scout_prov.providers) == 0:
-            check("Scout LLM Provider", False, "No active providers loaded")
+            check("Scout provider configuration constructed", False, "No active providers loaded")
         else:
-            check("Scout LLM Provider", True, "Scout provider configuration constructed")
+            check("Scout provider configuration constructed", True, f"{type(scout_prov).__name__}")
     except (ProviderConfigurationError, LLMInvocationError, Exception) as exc:
-        check("Scout LLM Provider", False, f"Initialization failed: {exc}")
+        check("Scout provider configuration constructed", False, f"Initialization failed: {exc}")
 
     # 6. Verifier LLM Provider
     try:
         verifier_prov = create_verifier_provider()
         if isinstance(verifier_prov, MultiLLMProvider) and len(verifier_prov.providers) == 0:
-            check("Verifier LLM Provider", False, "No active providers loaded")
+            check("Verifier provider configuration constructed", False, "No active providers loaded")
         else:
-            check("Verifier LLM Provider", True, "Verifier provider configuration constructed")
+            check("Verifier provider configuration constructed", True, f"{type(verifier_prov).__name__}")
     except (ProviderConfigurationError, LLMInvocationError, Exception) as exc:
-        check("Verifier LLM Provider", False, f"Initialization failed: {exc}")
+        check("Verifier provider configuration constructed", False, f"Initialization failed: {exc}")
 
     # 7. SQLite Writability
-    db_path = os.environ.get("ISSUE_ANALYZER_DB_PATH", "issueanalyzer_durable.db")
+    db_path = get_default_db_path()
     try:
         db_dir = os.path.dirname(os.path.abspath(db_path))
         os.makedirs(db_dir, exist_ok=True)
-        with sqlite3.connect(db_path) as conn:
+        conn = sqlite3.connect(db_path)
+        try:
             conn.execute("CREATE TABLE IF NOT EXISTS _preflight_diag (id INT)")
             conn.execute("DROP TABLE _preflight_diag")
-        check("SQLite Writability", True, f"Path '{db_path}' writable")
+            conn.commit()
+        finally:
+            conn.close()
+        check("Scout/Verifier SQLite writable", True, f"'{db_path}'")
     except Exception as exc:
-        check("SQLite Writability", False, f"Failed to write DB at '{db_path}': {exc}")
+        check("Scout/Verifier SQLite writable", False, f"Failed to write DB at '{db_path}': {exc}")
 
     # 8. Issue Writes Policy Check
     allow_writes = os.environ.get("LIVE_E2E_ALLOW_ISSUE_WRITES") == "1"

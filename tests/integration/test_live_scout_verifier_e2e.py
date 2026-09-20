@@ -23,16 +23,16 @@ import os
 import re
 import uuid
 import pytest
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load local .env for developer convenience; environment variables still take precedence
-load_dotenv()
-
-# Strict guard: exactly "1", no python truthiness on arbitrary non-empty strings
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_LIVE_SCOUT_E2E") != "1",
-    reason="RUN_LIVE_SCOUT_E2E is not '1'. Live provider E2E test skipped honestly.",
-)
+# Explicitly resolve repository root .env; OS environment variables still take precedence (override=False)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ENV = PROJECT_ROOT / ".env"
+if PROJECT_ENV.is_file():
+    load_dotenv(dotenv_path=PROJECT_ENV, override=False)
+else:
+    load_dotenv(override=False)
 
 from app.main import build_scout_service
 from app.services.issue_gate import SQLiteDedupStore
@@ -42,23 +42,40 @@ from app.github.app_auth import GitHubAppConfig, GitHubAppAuthenticator
 
 
 class LiveWriteDisabledError(RuntimeError):
-    """Raised when an issue write is attempted while LIVE_E2E_ALLOW_ISSUE_WRITES != '1'."""
+    """Retained for backward compatibility in test imports."""
     pass
 
 
 class GuardedGitHubClient:
-    """Wraps GitHubRestClient in live tests to strictly guard create_issue calls."""
+    """Wraps GitHubRestClient in live tests to safely intercept create_issue calls when writes are disabled."""
 
     def __init__(self, inner, allow_writes: bool):
         self._inner = inner
         self._allow_writes = allow_writes
+        self.simulated_issue_writes = 0
+        self.recorded_calls = []
 
-    async def create_issue(self, *args, **kwargs):
+    async def create_issue(
+        self, owner: str, repo: str, title: str, body: str, labels: list[str] | None = None
+    ) -> dict:
         if not self._allow_writes:
-            raise LiveWriteDisabledError(
-                "LIVE_E2E_ALLOW_ISSUE_WRITES != '1'. Issue write blocked by test harness safety guard."
-            )
-        return await self._inner.create_issue(*args, **kwargs)
+            self.simulated_issue_writes += 1
+            call_data = {
+                "owner": owner,
+                "repo": repo,
+                "title": title,
+                "body": body,
+                "labels": labels or [],
+            }
+            self.recorded_calls.append(call_data)
+            # Sentinel negative issue number clearly indicates a synthetic test dry-run response
+            return {
+                "number": -1,
+                "html_url": f"https://github.com/{owner}/{repo}/issues/dry-run-sentinel",
+                "title": title,
+                "state": "open",
+            }
+        return await self._inner.create_issue(owner, repo, title, body, labels=labels)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -67,6 +84,12 @@ class GuardedGitHubClient:
 @pytest.mark.asyncio
 async def test_live_scout_and_verifier_pipeline():
     """Executes live Scout -> Verifier against real configured sandbox repository."""
+    run_live = os.getenv("RUN_LIVE_SCOUT_E2E", "").strip()
+    if run_live != "1":
+        pytest.skip(
+            "Live Scout/Verifier E2E disabled: RUN_LIVE_SCOUT_E2E must equal exactly '1'"
+        )
+
     owner = os.environ.get("LIVE_E2E_OWNER", "").strip()
     repo = os.environ.get("LIVE_E2E_REPO", "").strip()
     expected_repo_id_str = os.environ.get("LIVE_E2E_EXPECTED_REPO_ID", "").strip()
@@ -75,6 +98,7 @@ async def test_live_scout_and_verifier_pipeline():
     commit_sha = os.environ.get("LIVE_E2E_COMMIT_SHA", "").strip()
     allow_writes = os.environ.get("LIVE_E2E_ALLOW_ISSUE_WRITES") == "1"
     expect_issue_creation = os.environ.get("LIVE_E2E_EXPECT_ISSUE_CREATION") == "1"
+    expect_authorized_finding = os.environ.get("LIVE_E2E_EXPECT_AUTHORIZED_FINDING") == "1"
     expected_changed_file = os.environ.get("LIVE_E2E_EXPECTED_CHANGED_FILE", "").strip()
 
     # STEP 5: Contradictory write flags must fail immediately
@@ -144,12 +168,16 @@ async def test_live_scout_and_verifier_pipeline():
         dedup_store = SQLiteDedupStore(db_path=db_path)
         write_journal = SQLiteIssueWriteJournal(db_path=db_path)
 
+        guarded_clients = []
+
         async def real_client_factory(inst_id: int):
             try:
                 raw_client = await authenticator.create_installation_client(inst_id)
             except Exception as exc:
                 pytest.fail(f"GitHub installation-token exchange failed for installation {inst_id}: {exc}")
-            return GuardedGitHubClient(raw_client, allow_writes=allow_writes)
+            client_wrapper = GuardedGitHubClient(raw_client, allow_writes=allow_writes)
+            guarded_clients.append(client_wrapper)
+            return client_wrapper
 
         # Build ScoutService with real providers (fail-closed on invalid provider setup)
         try:
@@ -228,6 +256,16 @@ async def test_live_scout_and_verifier_pipeline():
         if expected_changed_file:
             assert expected_changed_file in result.changed_files, (
                 f"Expected changed file '{expected_changed_file}' not found in {result.changed_files}"
+            )
+
+        # STEP 8: Optional dry-run authorized finding assertion (zero real GitHub mutations)
+        if expect_authorized_finding and not allow_writes:
+            total_simulated = sum(c.simulated_issue_writes for c in guarded_clients)
+            assert result.failures == [], f"Pipeline reported operational failures: {result.failures}"
+            assert result.ai_drafts >= 1, "Expected Scout to produce at least 1 draft finding"
+            assert result.escalated_findings >= 1, "Expected at least 1 finding to pass worthiness filter"
+            assert (total_simulated >= 1 or result.issues_created >= 1), (
+                "Expected test-only simulated write boundary to be reached without creating a real issue"
             )
 
         # STEP 4: Remove misleading arithmetic; verify real fields for LIVE_E2E_EXPECT_ISSUE_CREATION=1

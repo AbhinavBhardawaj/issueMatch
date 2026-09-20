@@ -27,15 +27,22 @@ import sqlite3
 import argparse
 import logging
 import uvicorn
+from pathlib import Path
 from fastapi import Request
 from dotenv import load_dotenv
 
-# Developer-facing bootstrap: load .env if present (environment variables take precedence)
-load_dotenv()
+# Explicitly resolve repository root .env; OS environment variables still take precedence (override=False)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ENV = PROJECT_ROOT / ".env"
+if PROJECT_ENV.is_file():
+    load_dotenv(dotenv_path=PROJECT_ENV, override=False)
+else:
+    load_dotenv(override=False)
 
 # Ensure project root is in sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.storage.sqlite import get_default_db_path
 from app.main import create_application, AppRuntimeConfig
 from app.github.app_auth import GitHubAppConfig, GitHubConfigurationError
 from app.infrastructure.llm_router import (
@@ -189,7 +196,7 @@ if __name__ == "__main__":
     parser.add_argument("--inspect", type=str, help="Inspect a specific delivery_id in SQLite DB and exit")
     args = parser.parse_args()
 
-    default_db = os.environ.get("ISSUE_ANALYZER_DB_PATH", "issueanalyzer_durable.db")
+    default_db = get_default_db_path()
 
     if args.inspect:
         inspect_delivery_cli(default_db, args.inspect)
