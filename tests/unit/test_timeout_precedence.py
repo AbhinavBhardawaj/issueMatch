@@ -51,6 +51,7 @@ def test_timeout_precedence_default_none(monkeypatch):
 
 def test_role_provider_applies_timeout(monkeypatch):
     """create_role_provider wires resolved timeout into provider instance."""
+    monkeypatch.delenv("SCOUT_PROVIDERS", raising=False)
     monkeypatch.setenv("SCOUT_PROVIDER", "GROQ")
     monkeypatch.setenv("SCOUT_API_KEY", "test-key-123")
     monkeypatch.setenv("SCOUT_TIMEOUT", "42.0")
@@ -62,6 +63,7 @@ def test_role_provider_applies_timeout(monkeypatch):
 
 def test_unknown_provider_raises_provider_configuration_error(monkeypatch):
     """Configuring an unknown provider name fails closed with ProviderConfigurationError."""
+    monkeypatch.delenv("SCOUT_PROVIDERS", raising=False)
     monkeypatch.setenv("SCOUT_PROVIDER", "NON_EXISTENT_PROVIDER")
     monkeypatch.setenv("SCOUT_API_KEY", "test-key-123")
 

@@ -3,15 +3,57 @@ from typing import Callable, Any
 from app.github.events import GitHubPushEvent
 from app.github.scout_repository import ScoutGitHubReadClient, verify_repository_identity
 from app.github.repo_fetcher import fetch_repo_context
-from app.scout.models import ChangedFile, ScoutRunResult
-from app.scout.context import ScoutContextBuilder
+from app.scout.models import ChangedFile, ScoutRunResult, ContextCompleteness
+from app.scout.context import ScoutContextBuilder, truncate_utf8_bytes, MAX_PATCH_BYTES
 from app.scout.agent import ScoutAgent
-from app.scout.worthiness import rank_and_filter_drafts, materialize_finding
+from app.scout.worthiness import (
+    validate_and_filter_drafts_for_context,
+    rank_and_cap_push_findings,
+    materialize_finding,
+)
 from app.services.pipeline import VerifierPipeline
 
 logger = logging.getLogger(__name__)
 
 ALL_ZERO_SHA = "0" * 40
+
+
+def partition_changed_files_for_scout(
+    changed_files: list[ChangedFile],
+    max_files_per_batch: int = 5,
+    max_estimated_bytes_per_batch: int = 35_000,
+) -> list[list[ChangedFile]]:
+    """
+    Deterministically partitions changed files into sequential batches before context building.
+    Guarantees every changed file is assigned to exactly one batch.
+    Never drops changed files.
+    """
+    if not changed_files:
+        return [[]]
+
+    batches: list[list[ChangedFile]] = []
+    current_batch: list[ChangedFile] = []
+    current_bytes = 0
+
+    for cf in changed_files:
+        patch_len = len(cf.patch.encode("utf-8")) if cf.patch else 0
+        est_file_weight = min(patch_len + 10_000, 20_000)
+
+        if current_batch and (
+            len(current_batch) >= max_files_per_batch
+            or (current_bytes + est_file_weight > max_estimated_bytes_per_batch)
+        ):
+            batches.append(current_batch)
+            current_batch = [cf]
+            current_bytes = est_file_weight
+        else:
+            current_batch.append(cf)
+            current_bytes += est_file_weight
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
 
 
 class ScoutService:
@@ -107,34 +149,79 @@ class ScoutService:
                 else:
                     failures.append(f"COMMIT_COMPARE_FAILED: {str(exc)}")
 
-        # 3. Build bounded ScoutContext
-        context_builder = ScoutContextBuilder(read_client)
-        scout_context = await context_builder.build_context(
-            event=event,
-            changed_files=changed_files,
-            is_initial_push=is_initial_push,
-            is_forced_push=is_forced_push,
-            tree_truncated=tree_truncated,
-        )
-
-        # 4. Scout Agent Discovery
-        try:
-            scout_response = await self.scout_agent.discover(event, scout_context)
-            ai_drafts = scout_response.findings
-        except Exception as exc:
-            logger.error(f"ScoutAgent discovery error: {exc}")
-            failures.append(f"SCOUT_AGENT_FAILED: {str(exc)}")
-            return ScoutRunResult(
-                repository_id=event.repository_id,
-                commit_sha=event.after_sha,
-                changed_files=[cf.path for cf in changed_files],
-                failures=failures,
+        # 3. Deterministic Changed-File Batch Partitioning & Safe Patch Bounding
+        bounded_changed_files: list[ChangedFile] = []
+        for cf in changed_files:
+            safe_patch = None
+            if cf.patch:
+                safe_patch, _ = truncate_utf8_bytes(cf.patch, MAX_PATCH_BYTES)
+            bounded_changed_files.append(
+                ChangedFile(
+                    path=cf.path,
+                    previous_path=cf.previous_path,
+                    status=cf.status,
+                    additions=cf.additions,
+                    deletions=cf.deletions,
+                    changes=cf.changes,
+                    patch=safe_patch,
+                )
             )
 
-        # 5. Deterministic Issue-Worthiness Policy & Caps
-        escalated_drafts, suppression_reasons = rank_and_filter_drafts(
-            ai_drafts, scout_context
-        )
+        batches = partition_changed_files_for_scout(bounded_changed_files)
+        total_batches = len(batches)
+
+        context_builder = ScoutContextBuilder(read_client)
+        all_surviving_drafts = []
+        all_suppression_reasons: list[dict] = []
+        total_ai_drafts = 0
+
+        for batch_idx, batch_files in enumerate(batches, start=1):
+            # Build batch-specific ScoutContext for THAT batch's changed files
+            batch_context = await context_builder.build_context(
+                event=event,
+                changed_files=batch_files,
+                is_initial_push=is_initial_push,
+                is_forced_push=is_forced_push,
+                tree_truncated=tree_truncated,
+            )
+
+            # If batched across multiple requests, mark context as PARTIAL
+            if total_batches > 1:
+                batch_reasons = list(batch_context.partial_reasons)
+                if "SCOUT_BATCHED_CONTEXT" not in batch_reasons:
+                    batch_reasons.append("SCOUT_BATCHED_CONTEXT")
+                batch_context = batch_context.model_copy(
+                    update={
+                        "context_completeness": ContextCompleteness.PARTIAL,
+                        "partial_reasons": batch_reasons,
+                    }
+                )
+
+            # 4. Scout Agent Discovery for this batch
+            try:
+                scout_response = await self.scout_agent.discover(
+                    event, batch_context, batch_index=batch_idx, total_batches=total_batches
+                )
+                batch_drafts = scout_response.findings
+                total_ai_drafts += len(batch_drafts)
+            except Exception as exc:
+                logger.error(f"ScoutAgent discovery error on batch {batch_idx}/{total_batches}: {exc}")
+                failures.append(f"SCOUT_AGENT_FAILED: {str(exc)}")
+                return ScoutRunResult(
+                    repository_id=event.repository_id,
+                    commit_sha=event.after_sha,
+                    changed_files=[cf.path for cf in changed_files],
+                    failures=failures,
+                )
+
+            # Validate batch drafts STRICTLY against the visible files in this batch's context
+            survivors, sups = validate_and_filter_drafts_for_context(batch_drafts, batch_context)
+            all_surviving_drafts.extend(survivors)
+            all_suppression_reasons.extend(sups)
+
+        # 5. Global Push-Wide Ranking and Capping across merged survivors
+        escalated_drafts, global_sups = rank_and_cap_push_findings(all_surviving_drafts)
+        all_suppression_reasons.extend(global_sups)
 
         # 6. Materialize Findings & Downstream Independent Verification
         issues_created = 0
@@ -185,11 +272,11 @@ class ScoutService:
             repository_id=event.repository_id,
             commit_sha=event.after_sha,
             changed_files=[cf.path for cf in changed_files],
-            ai_drafts=len(ai_drafts),
-            suppressed_findings=len(suppression_reasons),
+            ai_drafts=total_ai_drafts,
+            suppressed_findings=len(all_suppression_reasons),
             escalated_findings=len(escalated_drafts),
             verifier_rejected=verifier_rejected,
             issues_created=issues_created,
             failures=failures,
-            suppression_reasons=suppression_reasons,
+            suppression_reasons=all_suppression_reasons,
         )

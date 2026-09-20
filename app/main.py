@@ -95,7 +95,7 @@ def build_scout_service(
 ) -> ScoutService:
     """Builds a new ScoutService instance bound to the provided application stores."""
     # Scout LLM: Fail closed if explicitly configured with invalid settings
-    if os.environ.get("SCOUT_PROVIDER"):
+    if os.environ.get("SCOUT_PROVIDERS") or os.environ.get("SCOUT_PROVIDER"):
         scout_llm = create_scout_provider()
     else:
         try:
@@ -106,7 +106,7 @@ def build_scout_service(
             scout_llm = MultiLLMProvider([])
 
     # Verifier LLM: Fail closed if explicitly configured with invalid settings
-    if os.environ.get("VERIFIER_PROVIDER"):
+    if os.environ.get("VERIFIER_PROVIDERS") or os.environ.get("VERIFIER_PROVIDER"):
         verifier_llm = create_verifier_provider()
     else:
         try:
